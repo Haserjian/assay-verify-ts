@@ -106,6 +106,7 @@ interface ConformanceFixture {
   name: string;
   expectPassed: boolean;
   expectCode: string | null;
+  expectCodesAnyOf?: string[];     // if set, any of these codes is acceptable
   expectFailStage: string | null;
   faultClass: string | null;
   description: string;
@@ -141,9 +142,10 @@ function assertFixture(
   assert.equal(result.passed, fixture.expectPassed,
     `[${surface}/${fixture.name}] expected passed=${fixture.expectPassed}`);
 
-  if (fixture.expectCode) {
-    assert.ok(result.errors.some(e => e.code === fixture.expectCode),
-      `[${surface}/${fixture.name}] expected error ${fixture.expectCode}, got: ${result.errors.map(e => e.code).join(", ")}`);
+  const acceptCodes = fixture.expectCodesAnyOf ?? (fixture.expectCode ? [fixture.expectCode] : []);
+  if (acceptCodes.length > 0) {
+    assert.ok(result.errors.some(e => acceptCodes.includes(e.code)),
+      `[${surface}/${fixture.name}] expected one of [${acceptCodes.join(", ")}], got: ${result.errors.map(e => e.code).join(", ")}`);
   }
 
   if (fixture.expectFailStage) {
