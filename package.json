@@ -1,0 +1,18 @@
+{
+  "name": "assay-verify",
+  "version": "0.1.0",
+  "description": "Independent TypeScript verifier for Assay proof packs",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test dist/verify.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.7"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.2",
+    "@noble/hashes": "^2.0.1"
+  }
+}
