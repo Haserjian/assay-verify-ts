@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assay Pack Verifier</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.5rem; }
+  .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 2rem; text-align: center; cursor: pointer; transition: border-color 0.2s; margin-bottom: 1.5rem; }
+  .drop-zone:hover, .drop-zone.dragover { border-color: #4a9eff; background: #f0f7ff; }
+  .drop-zone input { display: none; }
+  .files-list { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
+  #result { display: none; }
+  .verdict { font-size: 1.2rem; font-weight: 700; padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+  .verdict.pass { background: #e6f9e6; color: #1a7a1a; border: 1px solid #b3e6b3; }
+  .verdict.fail { background: #fde8e8; color: #9a1a1a; border: 1px solid #f5b3b3; }
+  .stages { margin-bottom: 1rem; }
+  .stage { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; font-size: 0.9rem; border-bottom: 1px solid #eee; }
+  .stage-icon { width: 20px; text-align: center; }
+  .stage-name { font-family: monospace; flex: 1; }
+  .errors { background: #fff3f3; border: 1px solid #f5b3b3; border-radius: 6px; padding: 1rem; font-size: 0.85rem; }
+  .error-item { margin-bottom: 0.5rem; font-family: monospace; }
+  .error-code { font-weight: 700; color: #9a1a1a; }
+  .meta { font-size: 0.8rem; color: #888; margin-top: 1rem; }
+</style>
+</head>
+<body>
+
+<h1>Assay Pack Verifier</h1>
+<p class="subtitle">Independent client-side verification. No server, no backend, no trust required.</p>
+
+<div class="drop-zone" id="dropZone">
+  <p>Drop pack files here or click to select</p>
+  <p style="font-size: 0.8rem; color: #999; margin-top: 0.5rem;">
+    Select all 5 kernel files: pack_manifest.json, receipt_pack.jsonl,
+    verify_report.json, verify_transcript.md, pack_signature.sig
+  </p>
+  <input type="file" id="fileInput" multiple>
+  <div class="files-list" id="filesList"></div>
+</div>
+
+<div id="result">
+  <div class="verdict" id="verdict"></div>
+
+  <h3 style="margin-bottom: 0.5rem;">Verification Stages</h3>
+  <div class="stages" id="stages"></div>
+
+  <div id="errorsSection" style="display: none;">
+    <h3 style="margin-bottom: 0.5rem;">Errors</h3>
+    <div class="errors" id="errors"></div>
+  </div>
+
+  <div class="meta" id="meta"></div>
+</div>
+
+<script type="module">
+// Import only the runtime-neutral core — no Node, no SubtleCrypto
+import { verifyPack } from "./assay-verify.js";
+
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const filesList = document.getElementById("filesList");
+const resultDiv = document.getElementById("result");
+
+// Drag and drop
+dropZone.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener("change", () => handleFiles(fileInput.files));
+
+async function handleFiles(fileList) {
+  if (!fileList || fileList.length === 0) return;
+
+  // Show loaded files
+  const names = Array.from(fileList).map(f => f.name);
+  filesList.textContent = `Loaded: ${names.join(", ")}`;
+
+  // Build PackContents from loaded files
+  const files = new Map();
+  let manifest = null;
+
+  for (const file of fileList) {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    files.set(file.name, bytes);
+
+    if (file.name === "pack_manifest.json") {
+      try {
+        manifest = JSON.parse(new TextDecoder().decode(bytes));
+      } catch (e) {
+        showError("Failed to parse pack_manifest.json: " + e.message);
+        return;
+      }
+    }
+  }
+
+  if (!manifest) {
+    showError("pack_manifest.json not found in selected files.");
+    return;
+  }
+
+  // Run verification — fully client-side, sync
+  const t0 = performance.now();
+  const result = verifyPack({ manifest, files });
+  const elapsed = (performance.now() - t0).toFixed(1);
+
+  renderResult(result, elapsed);
+}
+
+function renderResult(result, elapsedMs) {
+  resultDiv.style.display = "block";
+
+  // Verdict
+  const verdict = document.getElementById("verdict");
+  verdict.className = `verdict ${result.passed ? "pass" : "fail"}`;
+  verdict.textContent = result.passed
+    ? "PASS — Pack integrity verified"
+    : "FAIL — Verification failed";
+
+  // Stages
+  const stagesDiv = document.getElementById("stages");
+  stagesDiv.innerHTML = "";
+  for (const s of result.stages) {
+    const icon = s.status === "ok" ? "✓" : s.status === "fail" ? "✗" : "—";
+    const color = s.status === "ok" ? "#1a7a1a" : s.status === "fail" ? "#9a1a1a" : "#888";
+    const div = document.createElement("div");
+    div.className = "stage";
+    div.innerHTML = `
+      <span class="stage-icon" style="color: ${color}">${icon}</span>
+      <span class="stage-name">${s.stage}</span>
+      <span style="color: ${color}; font-size: 0.85rem">${s.status}</span>
+    `;
+    stagesDiv.appendChild(div);
+  }
+
+  // Errors
+  const errorsSection = document.getElementById("errorsSection");
+  const errorsDiv = document.getElementById("errors");
+  if (result.errors.length > 0) {
+    errorsSection.style.display = "block";
+    errorsDiv.innerHTML = "";
+    for (const e of result.errors) {
+      const div = document.createElement("div");
+      div.className = "error-item";
+      div.innerHTML = `<span class="error-code">${e.code}</span>${e.field ? ` [${e.field}]` : ""}: ${e.message}`;
+      errorsDiv.appendChild(div);
+    }
+  } else {
+    errorsSection.style.display = "none";
+  }
+
+  // Meta
+  document.getElementById("meta").textContent =
+    `${result.receiptCount} receipts · ${result.stages.length} stages · ${elapsedMs}ms · head_hash: ${result.headHash?.slice(0, 16) ?? "null"}...`;
+}
+
+function showError(msg) {
+  resultDiv.style.display = "block";
+  document.getElementById("verdict").className = "verdict fail";
+  document.getElementById("verdict").textContent = msg;
+  document.getElementById("stages").innerHTML = "";
+  document.getElementById("errorsSection").style.display = "none";
+  document.getElementById("meta").textContent = "";
+}
+</script>
+
+</body>
+</html>
