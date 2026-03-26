@@ -117,6 +117,25 @@ describe("Golden pack specimen (full pipeline)", async () => {
     );
     assert.equal(manifest.pack_root_sha256, manifest.attestation_sha256);
   });
+
+  it("emits stage receipts for all verification phases", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.ok(result.stages.length >= 6, `Expected >= 6 stages, got ${result.stages.length}`);
+
+    const stageNames = result.stages.map((s) => s.stage);
+    assert.ok(stageNames.includes("validate_shape"), "Missing validate_shape stage");
+    assert.ok(stageNames.includes("validate_paths"), "Missing validate_paths stage");
+    assert.ok(stageNames.includes("validate_file_hashes"), "Missing validate_file_hashes stage");
+    assert.ok(stageNames.includes("validate_receipts"), "Missing validate_receipts stage");
+    assert.ok(stageNames.includes("validate_attestation"), "Missing validate_attestation stage");
+    assert.ok(stageNames.includes("verify_signature"), "Missing verify_signature stage");
+    assert.ok(stageNames.includes("check_d12_invariant"), "Missing check_d12_invariant stage");
+
+    // All stages should be ok for golden specimen
+    for (const s of result.stages) {
+      assert.equal(s.status, "ok", `Stage ${s.stage} should be ok, got ${s.status}`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -175,6 +194,13 @@ describe("Adversarial: tampered signature", async () => {
       `Expected E_PACK_SIG_INVALID, got: ${result.errors.map((e) => e.code).join(", ")}`
     );
   });
+
+  it("verify_signature stage is fail", async () => {
+    const result = await verifyPackManifest(packDir);
+    const sigStage = result.stages.find((s) => s.stage === "verify_signature");
+    assert.ok(sigStage, "Missing verify_signature stage");
+    assert.equal(sigStage!.status, "fail");
+  });
 });
 
 describe("Adversarial: missing kernel file", async () => {
@@ -214,6 +240,13 @@ describe("Adversarial: D12 invariant break", async () => {
       d12.length >= 1,
       `Expected E_MANIFEST_TAMPER on pack_root_sha256, got: ${JSON.stringify(result.errors)}`
     );
+  });
+
+  it("check_d12_invariant stage is fail", async () => {
+    const result = await verifyPackManifest(packDir);
+    const d12Stage = result.stages.find((s) => s.stage === "check_d12_invariant");
+    assert.ok(d12Stage, "Missing check_d12_invariant stage");
+    assert.equal(d12Stage!.status, "fail");
   });
 });
 

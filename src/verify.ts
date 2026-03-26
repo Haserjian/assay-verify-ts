@@ -32,9 +32,18 @@ export interface VerifyError {
   field?: string;
 }
 
+export interface StageReceipt {
+  stage: string;
+  status: "ok" | "fail" | "skipped";
+  code?: string;
+  reason?: string;
+  detail?: Record<string, unknown>;
+}
+
 export interface VerifyResult {
   passed: boolean;
   errors: VerifyError[];
+  stages: StageReceipt[];
   receiptCount: number;
   headHash: string | null;
 }
@@ -130,18 +139,30 @@ export async function verifyPackManifest(
   packDir: string
 ): Promise<VerifyResult> {
   const errors: VerifyError[] = [];
+  const stages: StageReceipt[] = [];
 
   // Load manifest
   const manifestBytes = await readFile(join(packDir, "pack_manifest.json"));
   const manifest = JSON.parse(manifestBytes.toString("utf-8"));
 
-  // Step 0: Structural validation before any file reads.
-  // Validate that manifest has required fields and that all path-bearing
-  // fields are contained within the pack root.
+  // --- validate_shape ---
   const files: FileEntry[] = Array.isArray(manifest.files) ? manifest.files : [];
   const expectedFiles: string[] = Array.isArray(manifest.expected_files) ? manifest.expected_files : [];
+  const shapeOk = Array.isArray(manifest.files) && Array.isArray(manifest.expected_files);
+  stages.push({
+    stage: "validate_shape",
+    status: shapeOk ? "ok" : "fail",
+    ...(!shapeOk ? { reason: "manifest.files or manifest.expected_files is not an array" } : {}),
+  });
+  if (!shapeOk) {
+    errors.push({
+      code: "E_MANIFEST_TAMPER",
+      message: "Manifest has malformed files or expected_files field",
+    });
+  }
 
-  // Containment check ALL paths before any file I/O
+  // --- validate_paths ---
+  let pathsOk = true;
   for (const entry of files) {
     if (!isContainedPath(entry.path)) {
       errors.push({
@@ -149,6 +170,7 @@ export async function verifyPackManifest(
         message: `Path escapes pack directory: ${entry.path}`,
         field: entry.path,
       });
+      pathsOk = false;
     }
   }
   for (const name of expectedFiles) {
@@ -158,30 +180,34 @@ export async function verifyPackManifest(
         message: `Expected file path escapes pack directory: ${name}`,
         field: name,
       });
+      pathsOk = false;
     }
   }
+  stages.push({
+    stage: "validate_paths",
+    status: pathsOk ? "ok" : "fail",
+    detail: { paths_checked: files.length + expectedFiles.length },
+  });
 
-  // If any paths escape, abort before file reads
-  if (errors.some((e) => e.code === "E_PATH_ESCAPE")) {
-    return { passed: false, errors, receiptCount: 0, headHash: null };
+  if (!pathsOk) {
+    return { passed: false, errors, stages, receiptCount: 0, headHash: null };
   }
 
-  // Step 1: File hash verification (all paths now containment-checked)
+  // --- validate_file_hashes ---
+  let fileHashOk = true;
   for (const entry of files) {
-    const filePath = join(packDir, entry.path);
-
     let fileData: Buffer;
     try {
-      fileData = await readFile(filePath);
+      fileData = await readFile(join(packDir, entry.path));
     } catch {
       errors.push({
         code: "E_MANIFEST_TAMPER",
         message: `File missing: ${entry.path}`,
         field: entry.path,
       });
+      fileHashOk = false;
       continue;
     }
-
     const actualHash = sha256hex(fileData);
     if (entry.sha256 && actualHash !== entry.sha256) {
       errors.push({
@@ -189,26 +215,32 @@ export async function verifyPackManifest(
         message: `Hash mismatch for ${entry.path}: expected ${entry.sha256.slice(0, 16)}..., got ${actualHash.slice(0, 16)}...`,
         field: entry.path,
       });
+      fileHashOk = false;
     }
   }
 
-  // Step 1b: Expected files present
   for (const name of expectedFiles) {
     try {
       await readFile(join(packDir, name));
     } catch {
-      const alreadyReported = errors.some((e) => e.field === name);
-      if (!alreadyReported) {
+      if (!errors.some((e) => e.field === name)) {
         errors.push({
           code: "E_MANIFEST_TAMPER",
           message: `Expected file missing: ${name}`,
           field: name,
         });
+        fileHashOk = false;
       }
     }
   }
+  stages.push({
+    stage: "validate_file_hashes",
+    status: fileHashOk ? "ok" : "fail",
+    detail: { files_checked: files.length },
+  });
 
-  // Step 2: Parse receipt_pack.jsonl, verify receipt count
+  // --- validate_receipts ---
+  let receiptsOk = true;
   const jsonlPath = join(packDir, "receipt_pack.jsonl");
   let receipts: Record<string, unknown>[] = [];
   try {
@@ -221,6 +253,7 @@ export async function verifyPackManifest(
       message: `Cannot parse receipt_pack.jsonl: ${e}`,
       field: "receipt_pack.jsonl",
     });
+    receiptsOk = false;
   }
 
   const expectedCount = manifest.receipt_count_expected;
@@ -229,12 +262,12 @@ export async function verifyPackManifest(
       code: "E_PACK_OMISSION_DETECTED",
       message: `Receipt count mismatch: manifest says ${expectedCount}, file has ${receipts.length}`,
     });
+    receiptsOk = false;
   }
 
-  // Step 2a: Duplicate receipt_id detection
   const seenIds = new Set<string>();
-  for (let i = 0; i < receipts.length; i++) {
-    const rid = receipts[i].receipt_id;
+  for (const receipt of receipts) {
+    const rid = receipt.receipt_id;
     if (typeof rid === "string") {
       if (seenIds.has(rid)) {
         errors.push({
@@ -242,12 +275,12 @@ export async function verifyPackManifest(
           message: `Duplicate receipt_id: ${rid}`,
           field: "receipt_id",
         });
+        receiptsOk = false;
       }
       seenIds.add(rid);
     }
   }
 
-  // Step 2b: Compute head hash (Layer 2 → Layer 1 for each receipt)
   let headHash: string | null = null;
   for (const receipt of receipts) {
     try {
@@ -259,27 +292,34 @@ export async function verifyPackManifest(
     }
   }
 
-  // Step 2c: Cross-check head hash and receipt integrity
   const attestation = manifest.attestation ?? {};
   const claimedHead = attestation.head_hash;
   if (claimedHead) {
     if (headHash === null) {
       errors.push({
         code: "E_MANIFEST_TAMPER",
-        message:
-          "Attestation claims head_hash but verifier could not recompute it",
+        message: "Attestation claims head_hash but verifier could not recompute it",
         field: "head_hash",
       });
+      receiptsOk = false;
     } else if (claimedHead !== headHash) {
       errors.push({
         code: "E_MANIFEST_TAMPER",
         message: "Recomputed head_hash does not match attestation",
         field: "head_hash",
       });
+      receiptsOk = false;
     }
   }
 
-  // Step 3: Attestation hash
+  stages.push({
+    stage: "validate_receipts",
+    status: receiptsOk ? "ok" : "fail",
+    detail: { receipt_count: receipts.length, head_hash: headHash },
+  });
+
+  // --- validate_attestation ---
+  let attestationOk = true;
   const attestationSha256 = manifest.attestation_sha256;
   if (attestation && attestationSha256) {
     const attCanonical = canonicalize(attestation);
@@ -290,12 +330,19 @@ export async function verifyPackManifest(
         message: "Attestation hash mismatch in manifest",
         field: "attestation_sha256",
       });
+      attestationOk = false;
     }
   }
+  stages.push({
+    stage: "validate_attestation",
+    status: attestationOk ? "ok" : "fail",
+  });
 
-  // Step 4a: Detached signature parity
+  // --- verify_signature ---
+  let signatureOk = true;
   const signatureB64: string | undefined = manifest.signature;
   let signatureBytes: Uint8Array | null = null;
+
   if (signatureB64) {
     signatureBytes = base64Decode(signatureB64);
 
@@ -304,10 +351,10 @@ export async function verifyPackManifest(
       if (Buffer.compare(Buffer.from(signatureBytes), sigFileBytes) !== 0) {
         errors.push({
           code: "E_PACK_SIG_INVALID",
-          message:
-            "Detached signature does not match manifest signature bytes",
+          message: "Detached signature does not match manifest signature bytes",
           field: "pack_signature.sig",
         });
+        signatureOk = false;
       }
     } catch {
       errors.push({
@@ -315,15 +362,16 @@ export async function verifyPackManifest(
         message: "Detached signature file missing: pack_signature.sig",
         field: "pack_signature.sig",
       });
+      signatureOk = false;
     }
   } else {
     errors.push({
       code: "E_PACK_SIG_INVALID",
       message: "Manifest has no signature",
     });
+    signatureOk = false;
   }
 
-  // Step 4b: Reconstruct unsigned manifest (contract-defined exclusion set)
   const unsigned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(manifest)) {
     if (!MANIFEST_SIGNING_EXCLUSIONS.has(key)) {
@@ -332,27 +380,24 @@ export async function verifyPackManifest(
   }
   const canonicalBytes = canonicalize(unsigned);
 
-  // Step 4c: Ed25519 signature verification (embedded pubkey)
   const signerPubkeyB64: string | undefined = manifest.signer_pubkey;
   const signerPubkeySha256: string | undefined = manifest.signer_pubkey_sha256;
 
   if (signatureBytes && signerPubkeyB64) {
     const pubkeyBytes = base64Decode(signerPubkeyB64);
 
-    // Verify fingerprint
     if (signerPubkeySha256) {
       const actualFp = sha256hex(pubkeyBytes);
       if (actualFp !== signerPubkeySha256) {
         errors.push({
           code: "E_PACK_SIG_INVALID",
-          message:
-            "Embedded signer_pubkey does not match signer_pubkey_sha256",
+          message: "Embedded signer_pubkey does not match signer_pubkey_sha256",
           field: "signer_pubkey_sha256",
         });
+        signatureOk = false;
       }
     }
 
-    // Verify Ed25519 signature
     try {
       const valid = ed.verify(signatureBytes, canonicalBytes, pubkeyBytes);
       if (!valid) {
@@ -360,28 +405,41 @@ export async function verifyPackManifest(
           code: "E_PACK_SIG_INVALID",
           message: "Manifest signature verification failed",
         });
+        signatureOk = false;
       }
     } catch {
       errors.push({
         code: "E_PACK_SIG_INVALID",
         message: "Manifest signature verification failed (exception)",
       });
+      signatureOk = false;
     }
   }
 
-  // Step 4d: D12 invariant
+  stages.push({
+    stage: "verify_signature",
+    status: signatureOk ? "ok" : "fail",
+  });
+
+  // --- check_d12_invariant ---
   const packRoot = manifest.pack_root_sha256;
-  if (packRoot && attestationSha256 && packRoot !== attestationSha256) {
+  const d12Ok = !packRoot || !attestationSha256 || packRoot === attestationSha256;
+  if (!d12Ok) {
     errors.push({
       code: "E_MANIFEST_TAMPER",
       message: "pack_root_sha256 does not match attestation_sha256",
       field: "pack_root_sha256",
     });
   }
+  stages.push({
+    stage: "check_d12_invariant",
+    status: d12Ok ? "ok" : "fail",
+  });
 
   return {
     passed: errors.length === 0,
     errors,
+    stages,
     receiptCount: receipts.length,
     headHash,
   };
