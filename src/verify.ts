@@ -10,12 +10,12 @@
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { canonicalize } from "./jcs.js";
 import * as ed from "@noble/ed25519";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { sha512 } from "@noble/hashes/sha2.js";
 
 // noble/ed25519 v2 requires a SHA-512 implementation
-import { sha512 } from "@noble/hashes/sha2.js";
 ed.etc.sha512Sync = (...m: Uint8Array[]) => {
   const h = sha512.create();
   for (const msg of m) h.update(msg);
@@ -48,6 +48,18 @@ export interface VerifyResult {
   headHash: string | null;
 }
 
+/**
+ * Runtime-neutral pack contents. The caller is responsible for loading
+ * files — this interface works in Node (via readFile) and browser
+ * (via fetch, drag-drop, FileReader, etc.).
+ */
+export interface PackContents {
+  /** Parsed pack_manifest.json */
+  manifest: Record<string, unknown>;
+  /** Filename → raw bytes for all pack files */
+  files: ReadonlyMap<string, Uint8Array>;
+}
+
 interface FileEntry {
   path: string;
   sha256: string;
@@ -58,12 +70,33 @@ interface FileEntry {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * SHA-256 hex digest. Uses @noble/hashes — sync, works in Node and browser.
+ * Runtime policy: Node 20.19+ (noble/hashes 2.x floor).
+ */
 function sha256hex(data: Uint8Array): string {
-  return createHash("sha256").update(data).digest("hex");
+  const hash = sha256(data);
+  return Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** Base64 decode using atob() — works in Node 16+ and all browsers. */
 function base64Decode(b64: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(b64, "base64"));
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/** Constant-length byte comparison (no short-circuit for timing safety). */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a[i]! ^ b[i]!;
+  }
+  return diff === 0;
 }
 
 /**
@@ -126,24 +159,19 @@ function isContainedPath(relativePath: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Verify an Assay proof pack from a directory path.
+ * Verify an Assay proof pack from pre-loaded contents.
+ *
+ * Runtime-neutral core: works in Node and browser. The caller is
+ * responsible for loading pack files into PackContents.
  *
  * Implements the 11-step mechanical verification pipeline from
  * PACK_CONTRACT.md §11.
- *
- * Invariant: no manifest-controlled filesystem access occurs until
- * the manifest has passed basic structural validation and all paths
- * have been containment-checked.
  */
-export async function verifyPackManifest(
-  packDir: string
-): Promise<VerifyResult> {
+export function verifyPack(pack: PackContents): VerifyResult {
   const errors: VerifyError[] = [];
   const stages: StageReceipt[] = [];
 
-  // Load manifest
-  const manifestBytes = await readFile(join(packDir, "pack_manifest.json"));
-  const manifest = JSON.parse(manifestBytes.toString("utf-8"));
+  const manifest = pack.manifest;
 
   // --- validate_shape ---
   const files: FileEntry[] = Array.isArray(manifest.files) ? manifest.files : [];
@@ -196,10 +224,8 @@ export async function verifyPackManifest(
   // --- validate_file_hashes ---
   let fileHashOk = true;
   for (const entry of files) {
-    let fileData: Buffer;
-    try {
-      fileData = await readFile(join(packDir, entry.path));
-    } catch {
+    const fileData = pack.files.get(entry.path);
+    if (!fileData) {
       errors.push({
         code: "E_MANIFEST_TAMPER",
         message: `File missing: ${entry.path}`,
@@ -220,9 +246,7 @@ export async function verifyPackManifest(
   }
 
   for (const name of expectedFiles) {
-    try {
-      await readFile(join(packDir, name));
-    } catch {
+    if (!pack.files.has(name)) {
       if (!errors.some((e) => e.field === name)) {
         errors.push({
           code: "E_MANIFEST_TAMPER",
@@ -241,19 +265,28 @@ export async function verifyPackManifest(
 
   // --- validate_receipts ---
   let receiptsOk = true;
-  const jsonlPath = join(packDir, "receipt_pack.jsonl");
   let receipts: Record<string, unknown>[] = [];
-  try {
-    const jsonlContent = await readFile(jsonlPath, "utf-8");
-    const lines = jsonlContent.split("\n").filter((l) => l.trim());
-    receipts = lines.map((l) => JSON.parse(l));
-  } catch (e) {
+  const jsonlBytes = pack.files.get("receipt_pack.jsonl");
+  if (!jsonlBytes) {
     errors.push({
       code: "E_MANIFEST_TAMPER",
-      message: `Cannot parse receipt_pack.jsonl: ${e}`,
+      message: "receipt_pack.jsonl not found in pack contents",
       field: "receipt_pack.jsonl",
     });
     receiptsOk = false;
+  } else {
+    try {
+      const jsonlContent = new TextDecoder().decode(jsonlBytes);
+      const lines = jsonlContent.split("\n").filter((l) => l.trim());
+      receipts = lines.map((l) => JSON.parse(l));
+    } catch (e) {
+      errors.push({
+        code: "E_MANIFEST_TAMPER",
+        message: `Cannot parse receipt_pack.jsonl: ${e}`,
+        field: "receipt_pack.jsonl",
+      });
+      receiptsOk = false;
+    }
   }
 
   const expectedCount = manifest.receipt_count_expected;
@@ -292,8 +325,8 @@ export async function verifyPackManifest(
     }
   }
 
-  const attestation = manifest.attestation ?? {};
-  const claimedHead = attestation.head_hash;
+  const attestation = (manifest.attestation ?? {}) as Record<string, unknown>;
+  const claimedHead = attestation.head_hash as string | undefined;
   if (claimedHead) {
     if (headHash === null) {
       errors.push({
@@ -340,26 +373,24 @@ export async function verifyPackManifest(
 
   // --- verify_signature ---
   let signatureOk = true;
-  const signatureB64: string | undefined = manifest.signature;
+  const signatureB64 = manifest.signature as string | undefined;
   let signatureBytes: Uint8Array | null = null;
 
   if (signatureB64) {
     signatureBytes = base64Decode(signatureB64);
 
-    try {
-      const sigFileBytes = await readFile(join(packDir, "pack_signature.sig"));
-      if (Buffer.compare(Buffer.from(signatureBytes), sigFileBytes) !== 0) {
-        errors.push({
-          code: "E_PACK_SIG_INVALID",
-          message: "Detached signature does not match manifest signature bytes",
-          field: "pack_signature.sig",
-        });
-        signatureOk = false;
-      }
-    } catch {
+    const sigFileBytes = pack.files.get("pack_signature.sig");
+    if (!sigFileBytes) {
       errors.push({
         code: "E_PACK_SIG_INVALID",
         message: "Detached signature file missing: pack_signature.sig",
+        field: "pack_signature.sig",
+      });
+      signatureOk = false;
+    } else if (!bytesEqual(signatureBytes, sigFileBytes)) {
+      errors.push({
+        code: "E_PACK_SIG_INVALID",
+        message: "Detached signature does not match manifest signature bytes",
         field: "pack_signature.sig",
       });
       signatureOk = false;
@@ -380,8 +411,8 @@ export async function verifyPackManifest(
   }
   const canonicalBytes = canonicalize(unsigned);
 
-  const signerPubkeyB64: string | undefined = manifest.signer_pubkey;
-  const signerPubkeySha256: string | undefined = manifest.signer_pubkey_sha256;
+  const signerPubkeyB64 = manifest.signer_pubkey as string | undefined;
+  const signerPubkeySha256 = manifest.signer_pubkey_sha256 as string | undefined;
 
   if (signatureBytes && signerPubkeyB64) {
     const pubkeyBytes = base64Decode(signerPubkeyB64);
@@ -443,4 +474,46 @@ export async function verifyPackManifest(
     receiptCount: receipts.length,
     headHash,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Node convenience wrapper (filesystem-based)
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify an Assay proof pack from a directory path.
+ *
+ * Node-only convenience wrapper. Reads all pack files from disk, then
+ * delegates to verifyPack() for the actual verification.
+ */
+export async function verifyPackManifest(
+  packDir: string
+): Promise<VerifyResult> {
+  const manifestBytes = await readFile(join(packDir, "pack_manifest.json"));
+  const manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
+
+  // Load all files referenced by the manifest + known kernel files
+  const fileNames = new Set<string>();
+  const fileEntries = Array.isArray(manifest.files) ? manifest.files : [];
+  for (const entry of fileEntries) {
+    if (typeof entry.path === "string") fileNames.add(entry.path);
+  }
+  const expected = Array.isArray(manifest.expected_files) ? manifest.expected_files : [];
+  for (const name of expected) {
+    if (typeof name === "string") fileNames.add(name);
+  }
+  // Always try to load the signature file
+  fileNames.add("pack_signature.sig");
+
+  const files = new Map<string, Uint8Array>();
+  for (const name of fileNames) {
+    try {
+      const data = await readFile(join(packDir, name));
+      files.set(name, new Uint8Array(data));
+    } catch {
+      // File not found — verifyPack will detect and report
+    }
+  }
+
+  return verifyPack({ manifest, files });
 }
