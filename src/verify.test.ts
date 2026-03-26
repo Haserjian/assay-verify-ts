@@ -66,17 +66,104 @@ describe("JCS conformance (Layer 1)", async () => {
 // ---------------------------------------------------------------------------
 
 describe("verify-core.ts runtime neutrality", async () => {
-  it("has zero Node built-in imports", async () => {
-    const source = await readFile(
-      join(import.meta.dirname!, "..", "src", "verify-core.ts"),
-      "utf-8"
-    );
+  const source = await readFile(
+    join(import.meta.dirname!, "..", "src", "verify-core.ts"),
+    "utf-8"
+  );
+
+  it("has zero Node built-in imports (node: prefix)", () => {
     const nodeImports = source.match(/from\s+["']node:/g) || [];
-    assert.equal(
-      nodeImports.length,
-      0,
-      `verify-core.ts must have zero Node imports, found: ${nodeImports.join(", ")}`
-    );
+    assert.equal(nodeImports.length, 0,
+      `Must have zero node: imports, found: ${nodeImports.join(", ")}`);
+  });
+
+  it("has zero bare Node module imports (fs, path, crypto)", () => {
+    const bareNodeImports = source.match(/from\s+["'](fs|path|crypto|os|child_process|http|https|net|stream|util)["']/g) || [];
+    assert.equal(bareNodeImports.length, 0,
+      `Must have zero bare Node imports, found: ${bareNodeImports.join(", ")}`);
+  });
+
+  it("has no Node global references (Buffer, process, __dirname)", () => {
+    // Check for common Node globals that indicate runtime coupling.
+    // Allow mentions in comments/strings by checking for usage patterns.
+    const lines = source.split("\n").filter(l => !l.trim().startsWith("//") && !l.trim().startsWith("*"));
+    const codeOnly = lines.join("\n");
+    const globals = ["Buffer", "process\\.", "__dirname", "__filename", "require\\("];
+    for (const g of globals) {
+      const matches = codeOnly.match(new RegExp(`\\b${g}`, "g")) || [];
+      assert.equal(matches.length, 0,
+        `verify-core.ts must not use Node global '${g}', found ${matches.length} occurrences`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parity: verifyPack() core == verifyPackManifest() wrapper
+// ---------------------------------------------------------------------------
+
+describe("Core/Node wrapper parity", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+
+  it("verifyPack and verifyPackManifest produce identical results", async () => {
+    // Node wrapper result
+    const nodeResult = await verifyPackManifest(packDir);
+
+    // Core result from manually loaded files
+    const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
+    const manifest = JSON.parse(manifestJson);
+    const fileNames = ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md",
+                       "pack_manifest.json", "pack_signature.sig"];
+    const files = new Map<string, Uint8Array>();
+    for (const name of fileNames) {
+      files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+    }
+    const coreResult = verifyPack({ manifest, files });
+
+    // Must agree on everything
+    assert.equal(coreResult.passed, nodeResult.passed);
+    assert.equal(coreResult.receiptCount, nodeResult.receiptCount);
+    assert.equal(coreResult.headHash, nodeResult.headHash);
+    assert.equal(coreResult.errors.length, nodeResult.errors.length);
+    assert.equal(coreResult.stages.length, nodeResult.stages.length);
+
+    // Same stage names in same order
+    for (let i = 0; i < coreResult.stages.length; i++) {
+      assert.equal(coreResult.stages[i]!.stage, nodeResult.stages[i]!.stage);
+      assert.equal(coreResult.stages[i]!.status, nodeResult.stages[i]!.status);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifyPack() — runtime-neutral core, in-memory only
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Browser bundle smoke test
+// ---------------------------------------------------------------------------
+
+describe("Browser bundle", async () => {
+  it("exports verifyPack from built bundle", async () => {
+    // @ts-expect-error — browser bundle has no .d.ts
+    const bundle = await import("../browser/assay-verify.js");
+    assert.equal(typeof bundle.verifyPack, "function");
+    assert.equal(typeof bundle.canonicalize, "function");
+  });
+
+  it("verifies golden specimen through browser bundle", async () => {
+    // @ts-expect-error — browser bundle has no .d.ts
+    const bundle = await import("../browser/assay-verify.js");
+    const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+    const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
+    const manifest = JSON.parse(manifestJson);
+    const fileNames = ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md",
+                       "pack_manifest.json", "pack_signature.sig"];
+    const files = new Map<string, Uint8Array>();
+    for (const name of fileNames) {
+      files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+    }
+    const result = bundle.verifyPack({ manifest, files });
+    assert.equal(result.passed, true, `Bundle verification failed: ${JSON.stringify(result.errors)}`);
   });
 });
 
