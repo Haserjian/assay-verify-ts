@@ -16,6 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Corpus lives in the assay repo — check it out before tests
+      - uses: actions/checkout@v4
+        with:
+          repository: Haserjian/assay
+          path: assay-corpus
+          sparse-checkout: tests/contracts/vectors
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -23,18 +30,8 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm test
-
-      # Corpus is not bundled in this repo — tests reference
-      # ~/assay/tests/contracts/vectors/ via ASSAY_VECTORS_DIR.
-      # CI uses a checkout of the assay repo for corpus access.
-      - uses: actions/checkout@v4
-        with:
-          repository: Haserjian/assay
-          path: assay-corpus
-          sparse-checkout: tests/contracts/vectors
 
       - name: Run conformance tests against corpus
         env:
           ASSAY_VECTORS_DIR: ${{ github.workspace }}/assay-corpus/tests/contracts/vectors
-        run: node --test dist/verify.test.js
+        run: npm test
