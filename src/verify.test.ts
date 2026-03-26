@@ -157,6 +157,107 @@ describe("Adversarial specimen: tampered receipt content", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Adversarial specimen suite: one fault per pack
+// ---------------------------------------------------------------------------
+
+describe("Adversarial: tampered signature", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/tampered_signature");
+
+  it("verification fails", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.equal(result.passed, false);
+  });
+
+  it("reports E_PACK_SIG_INVALID", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.ok(
+      result.errors.some((e) => e.code === "E_PACK_SIG_INVALID"),
+      `Expected E_PACK_SIG_INVALID, got: ${result.errors.map((e) => e.code).join(", ")}`
+    );
+  });
+});
+
+describe("Adversarial: missing kernel file", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/missing_kernel_file");
+
+  it("verification fails", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.equal(result.passed, false);
+  });
+
+  it("reports E_MANIFEST_TAMPER for missing file", async () => {
+    const result = await verifyPackManifest(packDir);
+    const missing = result.errors.filter(
+      (e) => e.code === "E_MANIFEST_TAMPER" && e.field === "verify_report.json"
+    );
+    assert.ok(
+      missing.length >= 1,
+      `Expected E_MANIFEST_TAMPER on verify_report.json, got: ${JSON.stringify(result.errors)}`
+    );
+  });
+});
+
+describe("Adversarial: D12 invariant break", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/d12_invariant_break");
+
+  it("verification fails", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.equal(result.passed, false);
+  });
+
+  it("reports E_MANIFEST_TAMPER for D12", async () => {
+    const result = await verifyPackManifest(packDir);
+    const d12 = result.errors.filter(
+      (e) => e.code === "E_MANIFEST_TAMPER" && e.field === "pack_root_sha256"
+    );
+    assert.ok(
+      d12.length >= 1,
+      `Expected E_MANIFEST_TAMPER on pack_root_sha256, got: ${JSON.stringify(result.errors)}`
+    );
+  });
+});
+
+describe("Adversarial: path traversal in manifest", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/path_traversal");
+
+  it("verification fails", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.equal(result.passed, false);
+  });
+
+  it("reports E_PATH_ESCAPE", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.ok(
+      result.errors.some((e) => e.code === "E_PATH_ESCAPE"),
+      `Expected E_PATH_ESCAPE, got: ${result.errors.map((e) => e.code).join(", ")}`
+    );
+  });
+});
+
+describe("Adversarial: duplicate receipt_id", async () => {
+  const packDir = join(ASSAY_VECTORS, "pack/duplicate_receipt_id");
+
+  it("verification fails", async () => {
+    const result = await verifyPackManifest(packDir);
+    assert.equal(result.passed, false);
+  });
+
+  it("reports duplicate detection (E_DUPLICATE_ID or E_MANIFEST_TAMPER)", async () => {
+    // The TS verifier detects duplicates directly (E_DUPLICATE_ID).
+    // The Python reference surfaces it as receipt_integrity mismatch.
+    // Both are valid conforming behaviors per the spec.
+    const result = await verifyPackManifest(packDir);
+    const valid = result.errors.some(
+      (e) => e.code === "E_DUPLICATE_ID" || e.code === "E_MANIFEST_TAMPER"
+    );
+    assert.ok(
+      valid,
+      `Expected E_DUPLICATE_ID or E_MANIFEST_TAMPER, got: ${result.errors.map((e) => e.code).join(", ")}`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Path containment (security invariant)
 // ---------------------------------------------------------------------------
 
