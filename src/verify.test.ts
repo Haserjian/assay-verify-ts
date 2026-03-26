@@ -105,19 +105,17 @@ describe("verify-core.ts runtime neutrality", async () => {
 interface ConformanceFixture {
   name: string;
   expectPassed: boolean;
-  expectCode: string | null;       // primary error code, or null for pass
-  expectFailStage: string | null;  // stage that should be "fail", or null for pass
+  expectCode: string | null;
+  expectFailStage: string | null;
+  faultClass: string | null;
+  description: string;
 }
 
-const CONFORMANCE_FIXTURES: ConformanceFixture[] = [
-  { name: "golden_minimal",         expectPassed: true,  expectCode: null,                expectFailStage: null },
-  { name: "tampered_receipt_content", expectPassed: false, expectCode: "E_MANIFEST_TAMPER", expectFailStage: "validate_file_hashes" },
-  { name: "tampered_signature",      expectPassed: false, expectCode: "E_PACK_SIG_INVALID", expectFailStage: "verify_signature" },
-  { name: "missing_kernel_file",     expectPassed: false, expectCode: "E_MANIFEST_TAMPER", expectFailStage: "validate_file_hashes" },
-  { name: "d12_invariant_break",     expectPassed: false, expectCode: "E_MANIFEST_TAMPER", expectFailStage: "check_d12_invariant" },
-  { name: "path_traversal",          expectPassed: false, expectCode: "E_PATH_ESCAPE",     expectFailStage: "validate_paths" },
-  { name: "duplicate_receipt_id",    expectPassed: false, expectCode: "E_DUPLICATE_ID",    expectFailStage: "validate_receipts" },
-];
+// Load fixture expectations from the shared spec file (lives in the Assay corpus).
+// This is the same file that Python or any future implementation would consume.
+const fixturesFile = join(ASSAY_VECTORS, "pack/conformance-fixtures.json");
+const fixturesData = JSON.parse(await readFile(fixturesFile, "utf-8"));
+const CONFORMANCE_FIXTURES: ConformanceFixture[] = fixturesData.fixtures;
 
 /** Load a pack directory into PackContents for the core API. */
 async function loadPack(dir: string): Promise<PackContents> {
