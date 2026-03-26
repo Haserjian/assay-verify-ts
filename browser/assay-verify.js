@@ -1053,7 +1053,7 @@ var sha512 = /* @__PURE__ */ createHasher(
   /* @__PURE__ */ oidNist(3)
 );
 
-// src/verify.ts
+// src/verify-core.ts
 etc.sha512Sync = (...m) => {
   const h2 = sha512.create();
   for (const msg of m) h2.update(msg);

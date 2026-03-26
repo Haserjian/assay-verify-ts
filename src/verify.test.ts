@@ -62,6 +62,25 @@ describe("JCS conformance (Layer 1)", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Structural invariant: verify-core.ts has no Node imports
+// ---------------------------------------------------------------------------
+
+describe("verify-core.ts runtime neutrality", async () => {
+  it("has zero Node built-in imports", async () => {
+    const source = await readFile(
+      join(import.meta.dirname!, "..", "src", "verify-core.ts"),
+      "utf-8"
+    );
+    const nodeImports = source.match(/from\s+["']node:/g) || [];
+    assert.equal(
+      nodeImports.length,
+      0,
+      `verify-core.ts must have zero Node imports, found: ${nodeImports.join(", ")}`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // verifyPack() — runtime-neutral core, in-memory only
 // ---------------------------------------------------------------------------
 
