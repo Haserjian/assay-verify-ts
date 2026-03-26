@@ -27,15 +27,19 @@ Uses **Assay JCS Profile v1** — based on RFC 8785 with one documented deviatio
 
 This is explicitly Assay canonicalization doctrine, not unqualified RFC 8785 conformance.
 
-## Running
+## Development
 
 ```bash
-npm install
-npm run build
-npm test
+npm ci          # install exact deps from lockfile
+npm run build   # compile TypeScript → dist/
+npm test        # build + run all conformance tests
 ```
 
-Tests run against the Assay conformance corpus at `~/assay/tests/contracts/vectors/`. Set `ASSAY_VECTORS_DIR` to override.
+Tests run against the Assay conformance corpus. Locally, the default path is `~/assay/tests/contracts/vectors/`. Set `ASSAY_VECTORS_DIR` to override. In CI, the corpus is checked out from the `Haserjian/assay` repo automatically.
+
+### CI
+
+GitHub Actions runs `npm ci && npm run build && npm test` on Node 20 and 22, then re-runs conformance tests against a fresh checkout of the Assay corpus. See `.github/workflows/ci.yml`.
 
 ## Contract References
 

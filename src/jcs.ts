@@ -12,7 +12,7 @@
  */
 
 /**
- * Canonicalize a JSON-compatible value to RFC 8785 canonical UTF-8 bytes.
+ * Canonicalize a JSON-compatible value to Assay JCS Profile v1 bytes.
  */
 export function canonicalize(value: unknown): Uint8Array {
   const str = serializeValue(value);
