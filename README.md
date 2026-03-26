@@ -8,9 +8,29 @@ A second implementation of the Assay pack verification contract, built from the 
 
 This verifier proves that the Assay pack contract is portable across implementations. It does not define doctrine; it instantiates frozen doctrine.
 
+## API
+
+Two entry points:
+
+```typescript
+// Runtime-neutral core (Node + browser)
+import { verifyPack, PackContents } from "assay-verify/dist/verify.js";
+const result = verifyPack({ manifest, files }); // sync, no I/O
+
+// Node convenience wrapper (reads files from disk)
+import { verifyPackManifest } from "assay-verify/dist/verify.js";
+const result = await verifyPackManifest("/path/to/pack"); // async, reads files
+```
+
+`verifyPack()` takes pre-loaded pack contents as `PackContents`:
+- `manifest`: parsed `pack_manifest.json` object
+- `files`: `ReadonlyMap<string, Uint8Array>` of filename → raw bytes
+
+Browser callers load files via fetch/FileReader/drag-drop and call `verifyPack()` directly. No Node, no SubtleCrypto, no async required.
+
 ## What It Verifies
 
-Given a 5-file proof pack directory:
+Given a 5-file proof pack:
 - File hash integrity (SHA-256)
 - Ed25519 signature verification (embedded pubkey)
 - Attestation hash linkage

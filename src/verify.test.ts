@@ -15,7 +15,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { canonicalize, canonicalizeToString } from "./jcs.js";
-import { verifyPackManifest } from "./verify.js";
+import { verifyPackManifest, verifyPack } from "./verify.js";
+import type { PackContents } from "./verify.js";
 
 // Path to the Assay conformance corpus (relative to repo root)
 const ASSAY_VECTORS = join(
@@ -57,6 +58,66 @@ describe("JCS conformance (Layer 1)", async () => {
   it("JCS-G09 language-level: -0.0 canonicalizes as 0", () => {
     const canonical = canonicalizeToString({ a: -0 });
     assert.equal(canonical, '{"a":0}');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifyPack() — runtime-neutral core, in-memory only
+// ---------------------------------------------------------------------------
+
+describe("verifyPack() in-memory core", async () => {
+  // Load golden specimen into memory to test the runtime-neutral path
+  const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+  const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
+  const manifest = JSON.parse(manifestJson);
+
+  const fileNames = [
+    "receipt_pack.jsonl",
+    "verify_report.json",
+    "verify_transcript.md",
+    "pack_manifest.json",
+    "pack_signature.sig",
+  ];
+  const files = new Map<string, Uint8Array>();
+  for (const name of fileNames) {
+    files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+  }
+  const pack: PackContents = { manifest, files };
+
+  it("passes with in-memory pack contents (no filesystem)", () => {
+    const result = verifyPack(pack);
+    assert.equal(result.passed, true, `Errors: ${JSON.stringify(result.errors)}`);
+    assert.equal(result.errors.length, 0);
+  });
+
+  it("is synchronous (returns VerifyResult, not Promise)", () => {
+    const result = verifyPack(pack);
+    // verifyPack is sync — result is not a Promise
+    assert.equal(typeof result.passed, "boolean");
+    assert.ok(Array.isArray(result.stages));
+  });
+
+  it("emits stage receipts from in-memory path", () => {
+    const result = verifyPack(pack);
+    assert.ok(result.stages.length >= 7);
+    for (const s of result.stages) {
+      assert.equal(s.status, "ok", `Stage ${s.stage} should be ok`);
+    }
+  });
+
+  it("detects tampered content from in-memory data", () => {
+    // Modify one byte in the JSONL to simulate tamper
+    const tamperedJsonl = new Uint8Array(files.get("receipt_pack.jsonl")!);
+    tamperedJsonl[0] = tamperedJsonl[0]! ^ 0xff;
+    const tamperedFiles = new Map(files);
+    tamperedFiles.set("receipt_pack.jsonl", tamperedJsonl);
+
+    const result = verifyPack({ manifest, files: tamperedFiles });
+    assert.equal(result.passed, false);
+    assert.ok(
+      result.errors.some((e) => e.code === "E_MANIFEST_TAMPER"),
+      "Should detect file hash tamper"
+    );
   });
 });
 
