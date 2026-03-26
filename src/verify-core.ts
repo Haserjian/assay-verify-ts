@@ -77,6 +77,8 @@ function sha256hex(data: Uint8Array): string {
   return Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+const EMPTY_PACK_HEAD_HASH = sha256hex(new TextEncoder().encode("empty"));
+
 /** Base64 decode using atob() — works in Node 16+ and all browsers. */
 function base64Decode(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -322,6 +324,9 @@ export function verifyPack(pack: PackContents): VerifyResult {
       headHash = null;
     }
   }
+  if (headHash === null && receipts.length === 0) {
+    headHash = EMPTY_PACK_HEAD_HASH;
+  }
 
   const attestation = (manifest.attestation ?? {}) as Record<string, unknown>;
   const claimedHead = attestation.head_hash as string | undefined;
@@ -443,6 +448,16 @@ export function verifyPack(pack: PackContents): VerifyResult {
       });
       signatureOk = false;
     }
+  }
+
+  // Fail closed: signature present but no pubkey to verify against
+  if (signatureBytes && !signerPubkeyB64) {
+    errors.push({
+      code: "E_PACK_SIG_INVALID",
+      message: "Cannot verify signature: signer_pubkey is missing",
+      field: "signer_pubkey",
+    });
+    signatureOk = false;
   }
 
   stages.push({

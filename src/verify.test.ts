@@ -664,6 +664,98 @@ describe("Duplicate receipt_id detection (PK-A06)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fail-closed: signature present but signer_pubkey absent (CVE guard)
+// ---------------------------------------------------------------------------
+
+describe("Fail-closed: signature present, signer_pubkey absent", () => {
+  it("returns passed=false with E_PACK_SIG_INVALID via core verifyPack()", () => {
+    // Craft a pack where signature + detached sig exist but signer_pubkey is missing.
+    // Before the fix, Ed25519 block was skipped and signatureOk stayed true.
+    const fakeSignature = new Uint8Array(64); // 64 zero bytes — valid length for Ed25519
+    const fakeSignatureB64 = btoa(String.fromCharCode(...fakeSignature));
+
+    const jsonlContent = new TextEncoder().encode(
+      JSON.stringify({ receipt_id: "r-001", type: "test" }) + "\n"
+    );
+    const jsonlHash = createHash("sha256").update(jsonlContent).digest("hex");
+
+    const manifest: Record<string, unknown> = {
+      files: [
+        { path: "receipt_pack.jsonl", sha256: jsonlHash, bytes: jsonlContent.length },
+      ],
+      expected_files: ["receipt_pack.jsonl", "pack_manifest.json", "pack_signature.sig"],
+      receipt_count_expected: 1,
+      attestation: {},
+      signature: fakeSignatureB64,
+      // signer_pubkey deliberately absent
+      // signer_pubkey_sha256 deliberately absent
+    };
+
+    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+
+    const files = new Map<string, Uint8Array>();
+    files.set("receipt_pack.jsonl", jsonlContent);
+    files.set("pack_manifest.json", manifestBytes);
+    files.set("pack_signature.sig", fakeSignature);
+
+    const pack: PackContents = { manifest, files };
+    const result = verifyPack(pack);
+
+    assert.equal(result.passed, false,
+      `Pack with signature but no signer_pubkey must fail, got errors: ${JSON.stringify(result.errors)}`);
+
+    const sigErrors = result.errors.filter(
+      (e) => e.code === "E_PACK_SIG_INVALID" && e.field === "signer_pubkey"
+    );
+    assert.ok(
+      sigErrors.length >= 1,
+      `Expected E_PACK_SIG_INVALID with field=signer_pubkey, got: ${result.errors.map((e) => `${e.code}(${e.field ?? ""})`).join(", ")}`
+    );
+
+    const sigStage = result.stages.find((s) => s.stage === "verify_signature");
+    assert.ok(sigStage, "Missing verify_signature stage");
+    assert.equal(sigStage!.status, "fail",
+      "verify_signature stage must be fail when pubkey is absent");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Empty-pack head_hash parity
+// ---------------------------------------------------------------------------
+
+describe("Empty-pack head_hash parity", () => {
+  it("uses the Python empty-pack sentinel instead of null", () => {
+    const emptyJsonl = new TextEncoder().encode("");
+    const emptyJsonlHash = createHash("sha256").update(emptyJsonl).digest("hex");
+    const emptyHeadHash = createHash("sha256").update("empty").digest("hex");
+
+    const manifest: Record<string, unknown> = {
+      files: [
+        { path: "receipt_pack.jsonl", sha256: emptyJsonlHash, bytes: 0 },
+      ],
+      expected_files: ["receipt_pack.jsonl", "pack_manifest.json"],
+      receipt_count_expected: 0,
+      attestation: {
+        head_hash: emptyHeadHash,
+      },
+    };
+
+    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+    const files = new Map<string, Uint8Array>();
+    files.set("receipt_pack.jsonl", emptyJsonl);
+    files.set("pack_manifest.json", manifestBytes);
+
+    const result = verifyPack({ manifest, files });
+
+    assert.equal(result.headHash, emptyHeadHash);
+    assert.ok(
+      !result.errors.some((e) => e.code === "E_MANIFEST_TAMPER" && e.field === "head_hash"),
+      `Empty pack should not fail head_hash parity, got errors: ${JSON.stringify(result.errors)}`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Malformed manifest shape (structural validation)
 // ---------------------------------------------------------------------------
 

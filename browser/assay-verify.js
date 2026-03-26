@@ -1063,6 +1063,7 @@ function sha256hex(data) {
   const hash = sha256(data);
   return Array.from(hash).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+var EMPTY_PACK_HEAD_HASH = sha256hex(new TextEncoder().encode("empty"));
 function base64Decode(b64) {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
@@ -1246,6 +1247,9 @@ function verifyPack(pack) {
       headHash = null;
     }
   }
+  if (headHash === null && receipts.length === 0) {
+    headHash = EMPTY_PACK_HEAD_HASH;
+  }
   const attestation = manifest.attestation ?? {};
   const claimedHead = attestation.head_hash;
   if (claimedHead) {
@@ -1354,6 +1358,14 @@ function verifyPack(pack) {
       });
       signatureOk = false;
     }
+  }
+  if (signatureBytes && !signerPubkeyB64) {
+    errors.push({
+      code: "E_PACK_SIG_INVALID",
+      message: "Cannot verify signature: signer_pubkey is missing",
+      field: "signer_pubkey"
+    });
+    signatureOk = false;
   }
   stages.push({
     stage: "verify_signature",
