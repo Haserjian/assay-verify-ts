@@ -102,35 +102,74 @@ describe("verify-core.ts runtime neutrality", async () => {
 // ---------------------------------------------------------------------------
 
 describe("Core/Node wrapper parity", async () => {
-  const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
-
-  it("verifyPack and verifyPackManifest produce identical results", async () => {
-    // Node wrapper result
-    const nodeResult = await verifyPackManifest(packDir);
-
-    // Core result from manually loaded files
+  /** Load a pack directory into PackContents for the core API. */
+  async function loadPack(packDir: string) {
     const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
     const manifest = JSON.parse(manifestJson);
     const fileNames = ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md",
                        "pack_manifest.json", "pack_signature.sig"];
     const files = new Map<string, Uint8Array>();
     for (const name of fileNames) {
-      files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+      try {
+        files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+      } catch { /* missing file — verifyPack will handle */ }
     }
-    const coreResult = verifyPack({ manifest, files });
+    return { manifest, files };
+  }
 
-    // Must agree on everything
-    assert.equal(coreResult.passed, nodeResult.passed);
-    assert.equal(coreResult.receiptCount, nodeResult.receiptCount);
-    assert.equal(coreResult.headHash, nodeResult.headHash);
-    assert.equal(coreResult.errors.length, nodeResult.errors.length);
-    assert.equal(coreResult.stages.length, nodeResult.stages.length);
-
-    // Same stage names in same order
-    for (let i = 0; i < coreResult.stages.length; i++) {
-      assert.equal(coreResult.stages[i]!.stage, nodeResult.stages[i]!.stage);
-      assert.equal(coreResult.stages[i]!.status, nodeResult.stages[i]!.status);
+  /** Assert two VerifyResults are equivalent. */
+  function assertResultsParity(
+    core: { passed: boolean; errors: Array<{code: string}>; stages: Array<{stage: string; status: string}>; receiptCount: number; headHash: string | null },
+    node: typeof core,
+    label: string,
+  ) {
+    assert.equal(core.passed, node.passed, `${label}: passed mismatch`);
+    assert.equal(core.receiptCount, node.receiptCount, `${label}: receiptCount mismatch`);
+    assert.equal(core.headHash, node.headHash, `${label}: headHash mismatch`);
+    assert.equal(core.errors.length, node.errors.length, `${label}: error count mismatch`);
+    assert.equal(core.stages.length, node.stages.length, `${label}: stage count mismatch`);
+    for (let i = 0; i < core.stages.length; i++) {
+      assert.equal(core.stages[i]!.stage, node.stages[i]!.stage, `${label}: stage ${i} name`);
+      assert.equal(core.stages[i]!.status, node.stages[i]!.status, `${label}: stage ${i} status`);
     }
+    for (let i = 0; i < core.errors.length; i++) {
+      assert.equal(core.errors[i]!.code, node.errors[i]!.code, `${label}: error ${i} code`);
+    }
+  }
+
+  it("golden: core and wrapper produce identical pass results", async () => {
+    const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+    const pack = await loadPack(packDir);
+    const coreResult = verifyPack(pack);
+    const nodeResult = await verifyPackManifest(packDir);
+    assertResultsParity(coreResult, nodeResult, "golden");
+  });
+
+  it("tampered_signature: core and wrapper produce identical fail results", async () => {
+    const packDir = join(ASSAY_VECTORS, "pack/tampered_signature");
+    const pack = await loadPack(packDir);
+    const coreResult = verifyPack(pack);
+    const nodeResult = await verifyPackManifest(packDir);
+    assertResultsParity(coreResult, nodeResult, "tampered_signature");
+    assert.equal(coreResult.passed, false);
+  });
+
+  it("missing_kernel_file: core and wrapper produce identical fail results", async () => {
+    const packDir = join(ASSAY_VECTORS, "pack/missing_kernel_file");
+    const pack = await loadPack(packDir);
+    const coreResult = verifyPack(pack);
+    const nodeResult = await verifyPackManifest(packDir);
+    assertResultsParity(coreResult, nodeResult, "missing_kernel_file");
+    assert.equal(coreResult.passed, false);
+  });
+
+  it("d12_invariant_break: core and wrapper produce identical fail results", async () => {
+    const packDir = join(ASSAY_VECTORS, "pack/d12_invariant_break");
+    const pack = await loadPack(packDir);
+    const coreResult = verifyPack(pack);
+    const nodeResult = await verifyPackManifest(packDir);
+    assertResultsParity(coreResult, nodeResult, "d12_invariant_break");
+    assert.equal(coreResult.passed, false);
   });
 });
 
@@ -150,20 +189,49 @@ describe("Browser bundle", async () => {
     assert.equal(typeof bundle.canonicalize, "function");
   });
 
-  it("verifies golden specimen through browser bundle", async () => {
-    // @ts-expect-error — browser bundle has no .d.ts
-    const bundle = await import("../browser/assay-verify.js");
-    const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+  /** Load pack files into a Map for browser-style verification. */
+  async function loadPackFiles(packDir: string) {
     const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
     const manifest = JSON.parse(manifestJson);
     const fileNames = ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md",
                        "pack_manifest.json", "pack_signature.sig"];
     const files = new Map<string, Uint8Array>();
     for (const name of fileNames) {
-      files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+      try {
+        files.set(name, new Uint8Array(await readFile(join(packDir, name))));
+      } catch { /* missing is fine — verifier handles */ }
     }
-    const result = bundle.verifyPack({ manifest, files });
+    return { manifest, files };
+  }
+
+  it("verifies golden specimen through browser bundle", async () => {
+    // @ts-expect-error — browser bundle has no .d.ts
+    const bundle = await import("../browser/assay-verify.js");
+    const pack = await loadPackFiles(join(ASSAY_VECTORS, "pack/golden_minimal"));
+    const result = bundle.verifyPack(pack);
     assert.equal(result.passed, true, `Bundle verification failed: ${JSON.stringify(result.errors)}`);
+  });
+
+  it("rejects tampered signature through browser bundle", async () => {
+    // @ts-expect-error — browser bundle has no .d.ts
+    const bundle = await import("../browser/assay-verify.js");
+    const pack = await loadPackFiles(join(ASSAY_VECTORS, "pack/tampered_signature"));
+    const result = bundle.verifyPack(pack);
+    assert.equal(result.passed, false);
+    assert.ok(result.errors.some((e: {code: string}) => e.code === "E_PACK_SIG_INVALID"),
+      "Bundle should detect signature tamper");
+    const sigStage = result.stages.find((s: {stage: string}) => s.stage === "verify_signature");
+    assert.equal(sigStage?.status, "fail", "verify_signature stage should be fail in bundle");
+  });
+
+  it("rejects missing kernel file through browser bundle", async () => {
+    // @ts-expect-error — browser bundle has no .d.ts
+    const bundle = await import("../browser/assay-verify.js");
+    const pack = await loadPackFiles(join(ASSAY_VECTORS, "pack/missing_kernel_file"));
+    const result = bundle.verifyPack(pack);
+    assert.equal(result.passed, false);
+    assert.ok(result.errors.some((e: {code: string}) => e.code === "E_MANIFEST_TAMPER"),
+      "Bundle should detect missing file");
   });
 });
 
