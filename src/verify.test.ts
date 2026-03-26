@@ -14,15 +14,24 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import * as ed from "@noble/ed25519";
 import { canonicalize, canonicalizeToString } from "./jcs.js";
 import { verifyPackManifest, verifyPack } from "./verify.js";
 import type { PackContents } from "./verify.js";
+
+ed.etc.sha512Sync = (...m: Uint8Array[]) => {
+  const h = createHash("sha512");
+  for (const msg of m) h.update(msg);
+  return h.digest();
+};
 
 // Path to the Assay conformance corpus (relative to repo root)
 const ASSAY_VECTORS = join(
   process.env.ASSAY_VECTORS_DIR ??
     join(process.env.HOME!, "assay/tests/contracts/vectors")
 );
+const SCHEMA_DEPTH_VECTORS = join(ASSAY_VECTORS, "pack-schema-depth");
+const GOLDEN_PACK_DIR = join(ASSAY_VECTORS, "pack", "golden_minimal");
 
 // ---------------------------------------------------------------------------
 // JCS Layer 1 conformance
@@ -178,6 +187,204 @@ function assertResultsParity(
     assert.equal(a.errors[i]!.code, b.errors[i]!.code, `${label}: error ${i} code`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Schema-validation depth parity
+// ---------------------------------------------------------------------------
+
+type ParityCategory = "exact_parity" | "equivalent_structural_parity" | "mismatch";
+
+const CANONICAL_SCHEMA_BOUNDARY = {
+  stage: "validate_schema",
+  code: "E_MANIFEST_TAMPER",
+} as const;
+
+const ACCEPTED_PARITY_CATEGORIES = new Set<ParityCategory>([
+  "exact_parity",
+  "equivalent_structural_parity",
+]);
+
+function firstFailStage(result: { stages: Array<{ stage: string; status: string }> }): string | null {
+  return result.stages.find((s) => s.status === "fail")?.stage ?? null;
+}
+
+function classifySchemaDepthParity(result: {
+  passed: boolean;
+  errors: Array<{ code: string }>;
+  stages: Array<{ stage: string; status: string }>;
+}): ParityCategory {
+  if (result.passed) {
+    return "mismatch";
+  }
+
+  const failStage = firstFailStage(result);
+  const hasCanonicalCode = result.errors.some((e) => e.code === CANONICAL_SCHEMA_BOUNDARY.code);
+  if (failStage === CANONICAL_SCHEMA_BOUNDARY.stage && hasCanonicalCode) {
+    return "exact_parity";
+  }
+
+  // A later failure for a different reason does not count as parity.
+  if (failStage === "validate_schema" || failStage === "validate_shape") {
+    return hasCanonicalCode ? "equivalent_structural_parity" : "mismatch";
+  }
+
+  return "mismatch";
+}
+
+async function buildSchemaDepthPack(specimenName: string): Promise<PackContents> {
+  const manifestJson = await readFile(
+    join(SCHEMA_DEPTH_VECTORS, specimenName, "pack_manifest.json"),
+    "utf-8"
+  );
+  const manifest = JSON.parse(manifestJson);
+
+  const files = new Map<string, Uint8Array>();
+  for (const name of ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md"]) {
+    files.set(name, new Uint8Array(await readFile(join(GOLDEN_PACK_DIR, name))));
+  }
+
+  return signManifestWithFiles(manifest, files, false);
+}
+
+async function loadGoldenPackTemplate(): Promise<{
+  manifest: Record<string, unknown>;
+  files: Map<string, Uint8Array>;
+}> {
+  const manifestJson = await readFile(join(GOLDEN_PACK_DIR, "pack_manifest.json"), "utf-8");
+  const manifest = JSON.parse(manifestJson);
+  const files = new Map<string, Uint8Array>();
+  for (const name of ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md"]) {
+    files.set(name, new Uint8Array(await readFile(join(GOLDEN_PACK_DIR, name))));
+  }
+  return { manifest, files };
+}
+
+function clonePackFiles(files: ReadonlyMap<string, Uint8Array>): Map<string, Uint8Array> {
+  const cloned = new Map<string, Uint8Array>();
+  for (const [name, bytes] of files.entries()) {
+    cloned.set(name, new Uint8Array(bytes));
+  }
+  return cloned;
+}
+
+function refreshManifestFileEntries(
+  manifest: Record<string, unknown>,
+  files: ReadonlyMap<string, Uint8Array>,
+): void {
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  for (const entry of manifestFiles) {
+    if (!entry || typeof entry !== "object") continue;
+    const fileEntry = entry as Record<string, unknown>;
+    const path = fileEntry.path;
+    if (typeof path !== "string") continue;
+    const bytes = files.get(path);
+    if (!bytes) continue;
+    fileEntry.sha256 = createHash("sha256").update(bytes).digest("hex");
+    fileEntry.bytes = bytes.length;
+  }
+}
+
+function computeReceiptHeadHash(receipts: Record<string, unknown>[]): string {
+  if (receipts.length === 0) {
+    return createHash("sha256").update("empty").digest("hex");
+  }
+
+  let headHash: string | null = null;
+  for (const receipt of receipts) {
+    const canonical = canonicalize(receipt);
+    headHash = createHash("sha256").update(canonical).digest("hex");
+  }
+
+  return headHash!;
+}
+
+async function signManifestWithFiles(
+  manifestInput: Record<string, unknown>,
+  filesInput: Map<string, Uint8Array>,
+  refreshEntries = true,
+): Promise<PackContents> {
+  const manifest = structuredClone(manifestInput) as Record<string, unknown>;
+  const files = clonePackFiles(filesInput);
+
+  if (refreshEntries) {
+    refreshManifestFileEntries(manifest, files);
+  }
+
+  const signerSeed = createHash("sha256").update("schema-depth-signer").digest();
+  const pubkey = await ed.getPublicKeyAsync(signerSeed);
+  const attestation = manifest.attestation as Record<string, unknown>;
+  const attCanonical = canonicalize(attestation);
+  const attHash = createHash("sha256").update(attCanonical).digest("hex");
+
+  const unsigned: Record<string, unknown> = {
+    ...manifest,
+    attestation_sha256: attHash,
+    signer_id: "schema-depth-signer",
+    signer_pubkey: Buffer.from(pubkey).toString("base64"),
+    signer_pubkey_sha256: createHash("sha256").update(pubkey).digest("hex"),
+    pack_root_sha256: attHash,
+  };
+  delete unsigned.signature;
+
+  const canonicalUnsigned = canonicalize(unsigned);
+  const signature = await ed.signAsync(canonicalUnsigned, signerSeed);
+  const finalManifest: Record<string, unknown> = {
+    ...unsigned,
+    signature: Buffer.from(signature).toString("base64"),
+  };
+
+  files.set(
+    "pack_manifest.json",
+    new TextEncoder().encode(JSON.stringify(finalManifest, null, 2))
+  );
+  files.set("pack_signature.sig", signature);
+
+  return { manifest: finalManifest, files };
+}
+
+async function buildSchemaValidGoldenPack(
+  mutator?: (manifest: Record<string, unknown>, files: Map<string, Uint8Array>) => void
+): Promise<PackContents> {
+  const { manifest, files } = await loadGoldenPackTemplate();
+  if (mutator) {
+    mutator(manifest, files);
+  }
+  return signManifestWithFiles(manifest, files);
+}
+
+describe("Schema-validation depth parity", async () => {
+  const fixturesFile = join(SCHEMA_DEPTH_VECTORS, "schema-depth-fixtures.json");
+  const fixturesData = JSON.parse(await readFile(fixturesFile, "utf-8"));
+  const fixtures: Array<{ name: string; description: string; mutation_class: string }> = fixturesData.fixtures;
+
+  for (const fixture of fixtures) {
+    it(`${fixture.name}: canonical schema boundary`, async () => {
+      const pack = await buildSchemaDepthPack(fixture.name);
+      const result = verifyPack(pack);
+      const parityCategory = classifySchemaDepthParity(result);
+      const failStage = firstFailStage(result);
+
+      assert.ok(
+        ACCEPTED_PARITY_CATEGORIES.has(parityCategory),
+        `[schema-depth/${fixture.name}] parity=${parityCategory}, stage=${failStage}, errors=${result.errors.map((e) => e.code).join(", ")}`
+      );
+      assert.equal(
+        result.passed,
+        false,
+        `[schema-depth/${fixture.name}] malformed specimen must fail`
+      );
+      assert.equal(
+        failStage,
+        CANONICAL_SCHEMA_BOUNDARY.stage,
+        `[schema-depth/${fixture.name}] expected structural rejection at ${CANONICAL_SCHEMA_BOUNDARY.stage}, got ${failStage ?? "pass"}`
+      );
+      assert.ok(
+        result.errors.some((e) => e.code === CANONICAL_SCHEMA_BOUNDARY.code),
+        `[schema-depth/${fixture.name}] expected ${CANONICAL_SCHEMA_BOUNDARY.code}, got ${result.errors.map((e) => e.code).join(", ")}`
+      );
+    });
+  }
+});
 
 // --- Core conformance ---
 
@@ -345,9 +552,10 @@ describe("Golden pack specimen (full pipeline)", async () => {
 
   it("emits stage receipts for all verification phases", async () => {
     const result = await verifyPackManifest(packDir);
-    assert.ok(result.stages.length >= 6, `Expected >= 6 stages, got ${result.stages.length}`);
+    assert.ok(result.stages.length >= 7, `Expected >= 7 stages, got ${result.stages.length}`);
 
     const stageNames = result.stages.map((s) => s.stage);
+    assert.ok(stageNames.includes("validate_schema"), "Missing validate_schema stage");
     assert.ok(stageNames.includes("validate_shape"), "Missing validate_shape stage");
     assert.ok(stageNames.includes("validate_paths"), "Missing validate_paths stage");
     assert.ok(stageNames.includes("validate_file_hashes"), "Missing validate_file_hashes stage");
@@ -520,24 +728,12 @@ describe("Adversarial: duplicate receipt_id", async () => {
 // ---------------------------------------------------------------------------
 
 describe("Path containment", () => {
-  // Shared helper for creating temp pack dirs with custom manifests
-  async function makeTempPack(manifest: unknown): Promise<string> {
-    const { mkdtemp, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const dir = await mkdtemp(join(tmpdir(), "assay-test-"));
-    await writeFile(
-      join(dir, "pack_manifest.json"),
-      JSON.stringify(manifest)
-    );
-    return dir;
-  }
-
   it("rejects path traversal in files", async () => {
-    const dir = await makeTempPack({
-      files: [{ path: "../../../etc/passwd", sha256: "a".repeat(64) }],
-      expected_files: ["receipt_pack.jsonl"],
+    const pack = await buildSchemaValidGoldenPack((manifest) => {
+      const files = manifest.files as Array<Record<string, unknown>>;
+      files[0]!.path = "../../../etc/passwd";
     });
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     assert.ok(
       result.errors.some((e) => e.code === "E_PATH_ESCAPE"),
@@ -546,11 +742,11 @@ describe("Path containment", () => {
   });
 
   it("rejects path traversal in expected_files", async () => {
-    const dir = await makeTempPack({
-      files: [],
-      expected_files: ["../outside.txt"],
+    const pack = await buildSchemaValidGoldenPack((manifest) => {
+      const expectedFiles = manifest.expected_files as string[];
+      expectedFiles[0] = "../outside.txt";
     });
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     assert.ok(
       result.errors.some((e) => e.code === "E_PATH_ESCAPE"),
@@ -559,11 +755,11 @@ describe("Path containment", () => {
   });
 
   it("rejects absolute path in files", async () => {
-    const dir = await makeTempPack({
-      files: [{ path: "/etc/passwd", sha256: "a".repeat(64) }],
-      expected_files: [],
+    const pack = await buildSchemaValidGoldenPack((manifest) => {
+      const files = manifest.files as Array<Record<string, unknown>>;
+      files[0]!.path = "/etc/passwd";
     });
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     assert.ok(
       result.errors.some((e) => e.code === "E_PATH_ESCAPE"),
@@ -572,11 +768,11 @@ describe("Path containment", () => {
   });
 
   it("rejects absolute path in expected_files", async () => {
-    const dir = await makeTempPack({
-      files: [],
-      expected_files: ["/etc/shadow"],
+    const pack = await buildSchemaValidGoldenPack((manifest) => {
+      const expectedFiles = manifest.expected_files as string[];
+      expectedFiles[0] = "/etc/shadow";
     });
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     assert.ok(
       result.errors.some((e) => e.code === "E_PATH_ESCAPE"),
@@ -585,12 +781,11 @@ describe("Path containment", () => {
   });
 
   it("aborts before file reads on path escape", async () => {
-    // If paths escape, verifier must return immediately — no file I/O
-    const dir = await makeTempPack({
-      files: [{ path: "../escape", sha256: "a".repeat(64) }],
-      expected_files: [],
+    const pack = await buildSchemaValidGoldenPack((manifest) => {
+      const files = manifest.files as Array<Record<string, unknown>>;
+      files[0]!.path = "../escape";
     });
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     // Should ONLY have path escape errors, nothing downstream
     assert.ok(
@@ -605,41 +800,35 @@ describe("Path containment", () => {
 // ---------------------------------------------------------------------------
 
 describe("Duplicate receipt_id detection (PK-A06)", () => {
-  // Helper: build a minimal valid-shape pack with custom JSONL content
   async function makePackWithJsonl(
     receipts: Record<string, unknown>[]
-  ): Promise<string> {
-    const { mkdtemp, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const dir = await mkdtemp(join(tmpdir(), "assay-test-"));
+  ): Promise<PackContents> {
+    return buildSchemaValidGoldenPack((manifest, files) => {
+      const jsonlContent = receipts.map((r) => JSON.stringify(r)).join("\n") + "\n";
+      const jsonlBytes = new TextEncoder().encode(jsonlContent);
+      files.set("receipt_pack.jsonl", jsonlBytes);
 
-    const jsonlContent = receipts.map((r) => JSON.stringify(r)).join("\n") + "\n";
-    const jsonlBytes = Buffer.from(jsonlContent);
-    const jsonlHash = createHash("sha256").update(jsonlBytes).digest("hex");
+      const manifestFiles = manifest.files as Array<Record<string, unknown>>;
+      const receiptEntry = manifestFiles.find((entry) => entry.path === "receipt_pack.jsonl");
+      if (!receiptEntry) {
+        throw new Error("golden pack template missing receipt_pack.jsonl");
+      }
+      receiptEntry.sha256 = createHash("sha256").update(jsonlBytes).digest("hex");
+      receiptEntry.bytes = jsonlBytes.length;
 
-    await writeFile(join(dir, "receipt_pack.jsonl"), jsonlContent);
-
-    const manifest = {
-      files: [
-        { path: "receipt_pack.jsonl", sha256: jsonlHash, bytes: jsonlBytes.length },
-      ],
-      expected_files: ["receipt_pack.jsonl", "pack_manifest.json"],
-      receipt_count_expected: receipts.length,
-      attestation: {},
-    };
-    await writeFile(
-      join(dir, "pack_manifest.json"),
-      JSON.stringify(manifest, null, 2)
-    );
-    return dir;
+      manifest.receipt_count_expected = receipts.length;
+      const attestation = manifest.attestation as Record<string, unknown>;
+      attestation.n_receipts = receipts.length;
+      attestation.head_hash = computeReceiptHeadHash(receipts);
+    });
   }
 
   it("rejects pack with duplicate receipt_ids", async () => {
-    const dir = await makePackWithJsonl([
+    const pack = await makePackWithJsonl([
       { receipt_id: "dup-001", type: "test", timestamp: "2026-01-01T00:00:00Z" },
       { receipt_id: "dup-001", type: "test", timestamp: "2026-01-01T00:00:01Z" },
     ]);
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     const dupErrors = result.errors.filter((e) => e.code === "E_DUPLICATE_ID");
     assert.ok(
       dupErrors.length >= 1,
@@ -650,11 +839,11 @@ describe("Duplicate receipt_id detection (PK-A06)", () => {
   it("detects E_DUPLICATE_ID independently in a valid-shaped pack", async () => {
     // E_DUPLICATE_ID must be present and independently detectable,
     // even if other errors (missing signature, etc.) also appear
-    const dir = await makePackWithJsonl([
+    const pack = await makePackWithJsonl([
       { receipt_id: "dup-002", type: "test", timestamp: "2026-01-01T00:00:00Z" },
       { receipt_id: "dup-002", type: "test", timestamp: "2026-01-01T00:00:01Z" },
     ]);
-    const result = await verifyPackManifest(dir);
+    const result = verifyPack(pack);
     assert.equal(result.passed, false);
     // E_DUPLICATE_ID must be present
     assert.ok(result.errors.some((e) => e.code === "E_DUPLICATE_ID"));
@@ -668,54 +857,26 @@ describe("Duplicate receipt_id detection (PK-A06)", () => {
 // ---------------------------------------------------------------------------
 
 describe("Fail-closed: signature present, signer_pubkey absent", () => {
-  it("returns passed=false with E_PACK_SIG_INVALID via core verifyPack()", () => {
-    // Craft a pack where signature + detached sig exist but signer_pubkey is missing.
-    // Before the fix, Ed25519 block was skipped and signatureOk stayed true.
-    const fakeSignature = new Uint8Array(64); // 64 zero bytes — valid length for Ed25519
-    const fakeSignatureB64 = btoa(String.fromCharCode(...fakeSignature));
-
-    const jsonlContent = new TextEncoder().encode(
-      JSON.stringify({ receipt_id: "r-001", type: "test" }) + "\n"
-    );
-    const jsonlHash = createHash("sha256").update(jsonlContent).digest("hex");
-
-    const manifest: Record<string, unknown> = {
-      files: [
-        { path: "receipt_pack.jsonl", sha256: jsonlHash, bytes: jsonlContent.length },
-      ],
-      expected_files: ["receipt_pack.jsonl", "pack_manifest.json", "pack_signature.sig"],
-      receipt_count_expected: 1,
-      attestation: {},
-      signature: fakeSignatureB64,
-      // signer_pubkey deliberately absent
-      // signer_pubkey_sha256 deliberately absent
-    };
-
-    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
-
-    const files = new Map<string, Uint8Array>();
-    files.set("receipt_pack.jsonl", jsonlContent);
-    files.set("pack_manifest.json", manifestBytes);
-    files.set("pack_signature.sig", fakeSignature);
-
-    const pack: PackContents = { manifest, files };
+  it("returns passed=false with validate_schema / E_MANIFEST_TAMPER", async () => {
+    const pack = await buildSchemaValidGoldenPack();
+    delete (pack.manifest as Record<string, unknown>).signer_pubkey;
     const result = verifyPack(pack);
 
     assert.equal(result.passed, false,
-      `Pack with signature but no signer_pubkey must fail, got errors: ${JSON.stringify(result.errors)}`);
+      `Pack with missing signer_pubkey must fail, got errors: ${JSON.stringify(result.errors)}`);
 
-    const sigErrors = result.errors.filter(
-      (e) => e.code === "E_PACK_SIG_INVALID" && e.field === "signer_pubkey"
+    const schemaErrors = result.errors.filter(
+      (e) => e.code === "E_MANIFEST_TAMPER" && e.field === "signer_pubkey"
     );
     assert.ok(
-      sigErrors.length >= 1,
-      `Expected E_PACK_SIG_INVALID with field=signer_pubkey, got: ${result.errors.map((e) => `${e.code}(${e.field ?? ""})`).join(", ")}`
+      schemaErrors.length >= 1,
+      `Expected E_MANIFEST_TAMPER with field=signer_pubkey, got: ${result.errors.map((e) => `${e.code}(${e.field ?? ""})`).join(", ")}`
     );
 
-    const sigStage = result.stages.find((s) => s.stage === "verify_signature");
-    assert.ok(sigStage, "Missing verify_signature stage");
-    assert.equal(sigStage!.status, "fail",
-      "verify_signature stage must be fail when pubkey is absent");
+    const schemaStage = result.stages.find((s) => s.stage === "validate_schema");
+    assert.ok(schemaStage, "Missing validate_schema stage");
+    assert.equal(schemaStage!.status, "fail",
+      "validate_schema stage must be fail when signer_pubkey is absent");
   });
 });
 
@@ -724,28 +885,29 @@ describe("Fail-closed: signature present, signer_pubkey absent", () => {
 // ---------------------------------------------------------------------------
 
 describe("Empty-pack head_hash parity", () => {
-  it("uses the Python empty-pack sentinel instead of null", () => {
+  it("uses the Python empty-pack sentinel instead of null", async () => {
     const emptyJsonl = new TextEncoder().encode("");
     const emptyJsonlHash = createHash("sha256").update(emptyJsonl).digest("hex");
     const emptyHeadHash = createHash("sha256").update("empty").digest("hex");
 
-    const manifest: Record<string, unknown> = {
-      files: [
-        { path: "receipt_pack.jsonl", sha256: emptyJsonlHash, bytes: 0 },
-      ],
-      expected_files: ["receipt_pack.jsonl", "pack_manifest.json"],
-      receipt_count_expected: 0,
-      attestation: {
-        head_hash: emptyHeadHash,
-      },
-    };
+    const pack = await buildSchemaValidGoldenPack((manifest, files) => {
+      files.set("receipt_pack.jsonl", emptyJsonl);
 
-    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
-    const files = new Map<string, Uint8Array>();
-    files.set("receipt_pack.jsonl", emptyJsonl);
-    files.set("pack_manifest.json", manifestBytes);
+      const manifestFiles = manifest.files as Array<Record<string, unknown>>;
+      const receiptEntry = manifestFiles.find((entry) => entry.path === "receipt_pack.jsonl");
+      if (!receiptEntry) {
+        throw new Error("golden pack template missing receipt_pack.jsonl");
+      }
+      receiptEntry.sha256 = emptyJsonlHash;
+      receiptEntry.bytes = 0;
 
-    const result = verifyPack({ manifest, files });
+      manifest.receipt_count_expected = 0;
+      const attestation = manifest.attestation as Record<string, unknown>;
+      attestation.n_receipts = 0;
+      attestation.head_hash = emptyHeadHash;
+    });
+
+    const result = verifyPack(pack);
 
     assert.equal(result.headHash, emptyHeadHash);
     assert.ok(

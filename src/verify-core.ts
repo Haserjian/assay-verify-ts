@@ -12,6 +12,7 @@ import { canonicalize } from "./jcs.js";
 import * as ed from "@noble/ed25519";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { sha512 } from "@noble/hashes/sha2.js";
+import { validateManifestSchema } from "./schema-validation.js";
 
 // noble/ed25519 v2 requires a SHA-512 implementation
 ed.etc.sha512Sync = (...m: Uint8Array[]) => {
@@ -172,6 +173,28 @@ export function verifyPack(pack: PackContents): VerifyResult {
   const stages: StageReceipt[] = [];
 
   const manifest = pack.manifest;
+
+  // --- validate_schema ---
+  const schemaErrors = validateManifestSchema(manifest);
+  if (schemaErrors.length > 0) {
+    stages.push({
+      stage: "validate_schema",
+      status: "fail",
+      reason: schemaErrors[0]!.message,
+    });
+    for (const issue of schemaErrors) {
+      errors.push({
+        code: "E_MANIFEST_TAMPER",
+        message: `Manifest schema validation failed: ${issue.message}`,
+        ...(issue.field ? { field: issue.field } : {}),
+      });
+    }
+    return { passed: false, errors, stages, receiptCount: 0, headHash: null };
+  }
+  stages.push({
+    stage: "validate_schema",
+    status: "ok",
+  });
 
   // --- validate_shape ---
   const files: FileEntry[] = Array.isArray(manifest.files) ? manifest.files : [];

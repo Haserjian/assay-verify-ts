@@ -69,13 +69,17 @@ GitHub Actions runs `npm ci && npm run build && npm test` on Node 20 and 22, the
 
 ## Dependencies
 
-- `@noble/ed25519` — audited Ed25519 implementation
-- `@noble/hashes` — SHA-512 for Ed25519 internals
-- Node.js `crypto` — SHA-256
+- `@noble/ed25519` - audited Ed25519 implementation
+- `@noble/hashes` - SHA-512 for Ed25519 internals
+- `ajv` - Draft 2020-12 schema validation
+- `ajv-formats` - schema format support used by the validator
+- Node.js `crypto` - SHA-256
 - Node.js >= 20
 
 ## Doctrine
 
 Second implementations instantiate frozen doctrine. They do not discover it.
 
-If this verifier disagrees with the Python reference on a corpus specimen, the investigation goes to the contract and corpus — not to either implementation's code.
+If this verifier disagrees with the Python reference on a corpus specimen, the investigation goes to the contract and corpus - not to either implementation's code.
+
+If you change the verifier core, rebuild the tracked browser bundle with `npm run build:browser` so `browser/assay-verify.js` stays in sync.
