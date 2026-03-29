@@ -403,23 +403,44 @@ export function verifyPack(pack: PackContents): VerifyResult {
   let signatureBytes: Uint8Array | null = null;
 
   if (signatureB64) {
-    signatureBytes = base64Decode(signatureB64);
+    try {
+      signatureBytes = base64Decode(signatureB64);
+    } catch {
+      errors.push({
+        code: "E_PACK_SIG_INVALID",
+        message: "Manifest signature is not valid base64",
+        field: "signature",
+      });
+      signatureOk = false;
+    }
 
-    const sigFileBytes = pack.files.get("pack_signature.sig");
-    if (!sigFileBytes) {
+    if (signatureBytes && signatureBytes.length !== 64) {
       errors.push({
         code: "E_PACK_SIG_INVALID",
-        message: "Detached signature file missing: pack_signature.sig",
-        field: "pack_signature.sig",
+        message: "Manifest signature must decode to 64 bytes",
+        field: "signature",
       });
       signatureOk = false;
-    } else if (!bytesEqual(signatureBytes, sigFileBytes)) {
-      errors.push({
-        code: "E_PACK_SIG_INVALID",
-        message: "Detached signature does not match manifest signature bytes",
-        field: "pack_signature.sig",
-      });
-      signatureOk = false;
+      signatureBytes = null;
+    }
+
+    if (signatureBytes) {
+      const sigFileBytes = pack.files.get("pack_signature.sig");
+      if (!sigFileBytes) {
+        errors.push({
+          code: "E_PACK_SIG_INVALID",
+          message: "Detached signature file missing: pack_signature.sig",
+          field: "pack_signature.sig",
+        });
+        signatureOk = false;
+      } else if (!bytesEqual(signatureBytes, sigFileBytes)) {
+        errors.push({
+          code: "E_PACK_SIG_INVALID",
+          message: "Detached signature does not match manifest signature bytes",
+          field: "pack_signature.sig",
+        });
+        signatureOk = false;
+      }
     }
   } else {
     errors.push({
@@ -441,9 +462,29 @@ export function verifyPack(pack: PackContents): VerifyResult {
   const signerPubkeySha256 = manifest.signer_pubkey_sha256 as string | undefined;
 
   if (signatureBytes && signerPubkeyB64) {
-    const pubkeyBytes = base64Decode(signerPubkeyB64);
+    let pubkeyBytes: Uint8Array | null = null;
+    try {
+      pubkeyBytes = base64Decode(signerPubkeyB64);
+    } catch {
+      errors.push({
+        code: "E_PACK_SIG_INVALID",
+        message: "Embedded signer_pubkey is not valid base64",
+        field: "signer_pubkey",
+      });
+      signatureOk = false;
+    }
 
-    if (signerPubkeySha256) {
+    if (pubkeyBytes && pubkeyBytes.length !== 32) {
+      errors.push({
+        code: "E_PACK_SIG_INVALID",
+        message: "Embedded signer_pubkey must decode to 32 bytes",
+        field: "signer_pubkey",
+      });
+      signatureOk = false;
+      pubkeyBytes = null;
+    }
+
+    if (pubkeyBytes && signerPubkeySha256) {
       const actualFp = sha256hex(pubkeyBytes);
       if (actualFp !== signerPubkeySha256) {
         errors.push({
@@ -455,21 +496,23 @@ export function verifyPack(pack: PackContents): VerifyResult {
       }
     }
 
-    try {
-      const valid = ed.verify(signatureBytes, canonicalBytes, pubkeyBytes);
-      if (!valid) {
+    if (signatureBytes && pubkeyBytes) {
+      try {
+        const valid = ed.verify(signatureBytes, canonicalBytes, pubkeyBytes);
+        if (!valid) {
+          errors.push({
+            code: "E_PACK_SIG_INVALID",
+            message: "Manifest signature verification failed",
+          });
+          signatureOk = false;
+        }
+      } catch {
         errors.push({
           code: "E_PACK_SIG_INVALID",
-          message: "Manifest signature verification failed",
+          message: "Manifest signature verification failed (exception)",
         });
         signatureOk = false;
       }
-    } catch {
-      errors.push({
-        code: "E_PACK_SIG_INVALID",
-        message: "Manifest signature verification failed (exception)",
-      });
-      signatureOk = false;
     }
   }
 
