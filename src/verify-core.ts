@@ -321,6 +321,22 @@ export function verifyPack(pack: PackContents): VerifyResult {
     receiptsOk = false;
   }
 
+  // Per-receipt required field validation (parity with Python verifier)
+  const REQUIRED_RECEIPT_FIELDS = ["receipt_id", "type", "timestamp"] as const;
+  for (let i = 0; i < receipts.length; i++) {
+    const receipt = receipts[i];
+    for (const f of REQUIRED_RECEIPT_FIELDS) {
+      if (!receipt[f]) {
+        errors.push({
+          code: "E_SCHEMA_UNKNOWN",
+          message: `Receipt ${i}: missing required field: ${f}`,
+          field: f,
+        });
+        receiptsOk = false;
+      }
+    }
+  }
+
   const seenIds = new Set<string>();
   for (const receipt of receipts) {
     const rid = receipt.receipt_id;

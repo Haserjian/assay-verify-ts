@@ -9177,6 +9177,20 @@ function verifyPack(pack) {
     });
     receiptsOk = false;
   }
+  const REQUIRED_RECEIPT_FIELDS = ["receipt_id", "type", "timestamp"];
+  for (let i = 0; i < receipts.length; i++) {
+    const receipt = receipts[i];
+    for (const f of REQUIRED_RECEIPT_FIELDS) {
+      if (!receipt[f]) {
+        errors.push({
+          code: "E_SCHEMA_UNKNOWN",
+          message: `Receipt ${i}: missing required field: ${f}`,
+          field: f
+        });
+        receiptsOk = false;
+      }
+    }
+  }
   const seenIds = /* @__PURE__ */ new Set();
   for (const receipt of receipts) {
     const rid = receipt.receipt_id;

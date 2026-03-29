@@ -990,3 +990,71 @@ describe("Malformed manifest shape", () => {
     assert.equal(typeof result.passed, "boolean");
   });
 });
+
+// ---------------------------------------------------------------------------
+// P2a: Per-receipt required field validation (Python verifier parity)
+// ---------------------------------------------------------------------------
+
+describe("Per-receipt required field validation", async () => {
+  // Load the golden pack and tamper receipts in-memory to test
+  // that missing required fields are caught at the receipt level.
+  const packDir = join(ASSAY_VECTORS, "pack/golden_minimal");
+  const manifestJson = await readFile(join(packDir, "pack_manifest.json"), "utf-8");
+  const goldenManifest = JSON.parse(manifestJson);
+
+  const fileNames = [
+    "receipt_pack.jsonl",
+    "verify_report.json",
+    "verify_transcript.md",
+    "pack_manifest.json",
+    "pack_signature.sig",
+  ];
+  const goldenFiles = new Map<string, Uint8Array>();
+  for (const name of fileNames) {
+    goldenFiles.set(name, new Uint8Array(await readFile(join(packDir, name))));
+  }
+
+  it("emits E_SCHEMA_UNKNOWN when receipt is missing 'type' field", () => {
+    // Parse the golden receipts, strip 'type' from the first one
+    const jsonlContent = new TextDecoder().decode(goldenFiles.get("receipt_pack.jsonl")!);
+    const lines = jsonlContent.split("\n").filter((l) => l.trim());
+    const receipts = lines.map((l) => JSON.parse(l));
+    // Remove 'type' from first receipt
+    delete receipts[0].type;
+    const tamperedJsonl = receipts.map((r: unknown) => JSON.stringify(r)).join("\n") + "\n";
+
+    const tamperedFiles = new Map(goldenFiles);
+    tamperedFiles.set("receipt_pack.jsonl", new TextEncoder().encode(tamperedJsonl));
+
+    const result = verifyPack({ manifest: goldenManifest, files: tamperedFiles });
+    // Pack will fail (tampered content), but we want to confirm the receipt
+    // field validation specifically fires
+    const schemaErrors = result.errors.filter(
+      (e) => e.code === "E_SCHEMA_UNKNOWN" && e.field === "type"
+    );
+    assert.ok(
+      schemaErrors.length > 0,
+      `Expected E_SCHEMA_UNKNOWN for missing 'type', got: ${JSON.stringify(result.errors.map(e => e.code + ":" + (e.field ?? "")))}`
+    );
+  });
+
+  it("emits E_SCHEMA_UNKNOWN when receipt is missing 'timestamp' field", () => {
+    const jsonlContent = new TextDecoder().decode(goldenFiles.get("receipt_pack.jsonl")!);
+    const lines = jsonlContent.split("\n").filter((l) => l.trim());
+    const receipts = lines.map((l) => JSON.parse(l));
+    delete receipts[0].timestamp;
+    const tamperedJsonl = receipts.map((r: unknown) => JSON.stringify(r)).join("\n") + "\n";
+
+    const tamperedFiles = new Map(goldenFiles);
+    tamperedFiles.set("receipt_pack.jsonl", new TextEncoder().encode(tamperedJsonl));
+
+    const result = verifyPack({ manifest: goldenManifest, files: tamperedFiles });
+    const schemaErrors = result.errors.filter(
+      (e) => e.code === "E_SCHEMA_UNKNOWN" && e.field === "timestamp"
+    );
+    assert.ok(
+      schemaErrors.length > 0,
+      `Expected E_SCHEMA_UNKNOWN for missing 'timestamp', got: ${JSON.stringify(result.errors.map(e => e.code + ":" + (e.field ?? "")))}`
+    );
+  });
+});
