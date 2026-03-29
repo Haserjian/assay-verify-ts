@@ -636,6 +636,36 @@ describe("Adversarial: tampered signature", async () => {
   });
 });
 
+describe("Malformed signature material", () => {
+  it("fails closed when signature is not valid base64", async () => {
+    const pack = await buildSchemaValidGoldenPack();
+    (pack.manifest as Record<string, unknown>).signature = "%%%";
+
+    const result = verifyPack(pack);
+
+    assert.equal(result.passed, false);
+    assert.ok(
+      result.errors.some((e) => e.code === "E_PACK_SIG_INVALID" && e.field === "signature"),
+      `Expected malformed signature to fail cleanly, got: ${JSON.stringify(result.errors)}`
+    );
+  });
+
+  it("fails closed when signer_pubkey is not valid base64", async () => {
+    const pack = await buildSchemaValidGoldenPack();
+    (pack.manifest as Record<string, unknown>).signer_pubkey = "%%%";
+
+    const result = verifyPack(pack);
+
+    assert.equal(result.passed, false);
+    assert.ok(
+      result.errors.some(
+        (e) => e.code === "E_PACK_SIG_INVALID" && e.field === "signer_pubkey"
+      ),
+      `Expected malformed signer_pubkey to fail cleanly, got: ${JSON.stringify(result.errors)}`
+    );
+  });
+});
+
 describe("Adversarial: missing kernel file", async () => {
   const packDir = join(ASSAY_VECTORS, "pack/missing_kernel_file");
 
