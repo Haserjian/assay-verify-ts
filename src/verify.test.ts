@@ -28,7 +28,7 @@ ed.etc.sha512Sync = (...m: Uint8Array[]) => {
 // Path to the Assay conformance corpus (relative to repo root)
 const ASSAY_VECTORS = join(
   process.env.ASSAY_VECTORS_DIR ??
-    join(process.env.HOME!, "assay/tests/contracts/vectors")
+    join(process.env.HOME!, "assay-toolkit/tests/contracts/vectors")
 );
 const SCHEMA_DEPTH_VECTORS = join(ASSAY_VECTORS, "pack-schema-depth");
 const GOLDEN_PACK_DIR = join(ASSAY_VECTORS, "pack", "golden_minimal");
