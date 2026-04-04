@@ -101,9 +101,14 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /**
- * Layer 2: Strip top-level signature fields from a receipt.
+ * Layer 2: enforce the receipt field-name policy, then strip top-level
+ * signature fields from a receipt.
  * Exclusion set v0: {anchor, cose_signature, receipt_hash, signature, signatures}
- * Root-level only — nested structures are payload.
+ * Root-level stripping only — nested structures remain payload.
+ *
+ * The field-name policy is intentionally above JCS: receipt object member
+ * names must be ASCII-only before head-hash projection. This is not a JCS
+ * normalization change.
  *
  * Contract reference: PACK_CONTRACT.md §4
  */
@@ -115,9 +120,41 @@ const SIGNATURE_FIELDS_V0 = new Set([
   "signatures",
 ]);
 
+function validateAsciiObjectMemberNames(value: unknown, path = "$"): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      validateAsciiObjectMemberNames(item, `${path}[${index}]`);
+    });
+    return;
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") {
+      throw new TypeError(
+        `Receipt object member names must be strings for canonicalization; found ${String(key)} at ${path}`
+      );
+    }
+    if (!/^[\x00-\x7F]*$/.test(key)) {
+      throw new Error(
+        `Receipt object member name ${JSON.stringify(key)} at ${path} contains non-ASCII characters. ` +
+        `Assay's field-name policy requires ASCII-only object member names before projection and canonicalization.`
+      );
+    }
+    validateAsciiObjectMemberNames(
+      (value as Record<string, unknown>)[key],
+      `${path}.${key}`
+    );
+  }
+}
+
 function prepareReceiptForHashing(
   receipt: Record<string, unknown>
 ): Record<string, unknown> {
+  validateAsciiObjectMemberNames(receipt);
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(receipt)) {
     if (!SIGNATURE_FIELDS_V0.has(key)) {
@@ -354,13 +391,24 @@ export function verifyPack(pack: PackContents): VerifyResult {
   }
 
   let headHash: string | null = null;
-  for (const receipt of receipts) {
+  let headHashComputationOk = true;
+  for (let i = 0; i < receipts.length; i++) {
+    const receipt = receipts[i]!;
     try {
       const prepared = prepareReceiptForHashing(receipt);
       const canonical = canonicalize(prepared);
       headHash = sha256hex(canonical);
-    } catch {
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      errors.push({
+        code: "E_MANIFEST_TAMPER",
+        message: `Receipt ${i}: ${message}`,
+        field: "receipt_pack.jsonl",
+      });
+      receiptsOk = false;
+      headHashComputationOk = false;
       headHash = null;
+      break;
     }
   }
   if (headHash === null && receipts.length === 0) {
@@ -371,11 +419,13 @@ export function verifyPack(pack: PackContents): VerifyResult {
   const claimedHead = attestation.head_hash as string | undefined;
   if (claimedHead) {
     if (headHash === null) {
-      errors.push({
-        code: "E_MANIFEST_TAMPER",
-        message: "Attestation claims head_hash but verifier could not recompute it",
-        field: "head_hash",
-      });
+      if (headHashComputationOk) {
+        errors.push({
+          code: "E_MANIFEST_TAMPER",
+          message: "Attestation claims head_hash but verifier could not recompute it",
+          field: "head_hash",
+        });
+      }
       receiptsOk = false;
     } else if (claimedHead !== headHash) {
       errors.push({

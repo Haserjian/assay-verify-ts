@@ -6,7 +6,8 @@
  * See CANONICALIZATION_PROFILE.md for the full deviation list.
  *
  * Pure canonicalization: JSON value in, canonical UTF-8 bytes out.
- * No signature stripping, no receipt projection, no normalization.
+ * No signature stripping, no receipt projection, no field-name policy,
+ * no normalization.
  *
  * Contract reference: docs/contracts/PACK_CONTRACT.md §3
  */

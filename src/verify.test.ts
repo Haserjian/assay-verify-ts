@@ -28,9 +28,10 @@ ed.etc.sha512Sync = (...m: Uint8Array[]) => {
 // Path to the Assay conformance corpus (relative to repo root)
 const ASSAY_VECTORS = join(
   process.env.ASSAY_VECTORS_DIR ??
-    join(process.env.HOME!, "assay-toolkit/tests/contracts/vectors")
+  join(process.env.HOME!, "assay", "tests", "contracts", "vectors")
 );
 const SCHEMA_DEPTH_VECTORS = join(ASSAY_VECTORS, "pack-schema-depth");
+const REGRESSION_VECTORS = join(ASSAY_VECTORS, "regression");
 const GOLDEN_PACK_DIR = join(ASSAY_VECTORS, "pack", "golden_minimal");
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ async function loadPack(dir: string): Promise<PackContents> {
   const manifestJson = await readFile(join(dir, "pack_manifest.json"), "utf-8");
   const manifest = JSON.parse(manifestJson);
   const fileNames = ["receipt_pack.jsonl", "verify_report.json", "verify_transcript.md",
-                     "pack_manifest.json", "pack_signature.sig"];
+    "pack_manifest.json", "pack_signature.sig"];
   const files = new Map<string, Uint8Array>();
   for (const name of fileNames) {
     try {
@@ -144,7 +145,7 @@ async function loadPack(dir: string): Promise<PackContents> {
 
 /** Assert a VerifyResult matches fixture expectations. */
 function assertFixture(
-  result: { passed: boolean; errors: Array<{code: string}>; stages: Array<{stage: string; status: string}> },
+  result: { passed: boolean; errors: Array<{ code: string }>; stages: Array<{ stage: string; status: string }> },
   fixture: ConformanceFixture,
   surface: string,
 ) {
@@ -170,7 +171,7 @@ function assertFixture(
 
 /** Assert two VerifyResults are equivalent across surfaces. */
 function assertResultsParity(
-  a: { passed: boolean; errors: Array<{code: string}>; stages: Array<{stage: string; status: string}>; receiptCount: number; headHash: string | null },
+  a: { passed: boolean; errors: Array<{ code: string }>; stages: Array<{ stage: string; status: string }>; receiptCount: number; headHash: string | null },
   b: typeof a,
   label: string,
 ) {
@@ -352,6 +353,41 @@ async function buildSchemaValidGoldenPack(
   return signManifestWithFiles(manifest, files);
 }
 
+async function buildPackWithSingleReceipt(
+  receipt: Record<string, unknown>
+): Promise<PackContents> {
+  return buildSchemaValidGoldenPack((manifest, files) => {
+    files.set(
+      "receipt_pack.jsonl",
+      new TextEncoder().encode(JSON.stringify(receipt) + "\n")
+    );
+    manifest.receipt_count_expected = 1;
+    const attestation = manifest.attestation as Record<string, unknown>;
+    attestation.head_hash = computeReceiptHeadHash([receipt]);
+  });
+}
+
+function assertReceiptFieldPolicyFailure(
+  result: ReturnType<typeof verifyPack>,
+  label: string
+): void {
+  const receiptStage = result.stages.find((stage) => stage.stage === "validate_receipts");
+
+  assert.equal(result.passed, false, `${label}: malformed receipt must fail`);
+  assert.ok(receiptStage, `${label}: missing validate_receipts stage`);
+  assert.equal(receiptStage!.status, "fail", `${label}: validate_receipts must fail`);
+  assert.ok(
+    result.errors.some(
+      (e) => e.code === "E_MANIFEST_TAMPER" && e.field === "receipt_pack.jsonl"
+    ),
+    `${label}: expected receipt_pack.jsonl canonicalization failure, got: ${JSON.stringify(result.errors)}`
+  );
+  assert.ok(
+    result.errors.some((e) => e.message.includes("ASCII-only object member names")),
+    `${label}: expected ASCII-only boundary message, got: ${JSON.stringify(result.errors)}`
+  );
+}
+
 describe("Schema-validation depth parity", async () => {
   const fixturesFile = join(SCHEMA_DEPTH_VECTORS, "schema-depth-fixtures.json");
   const fixturesData = JSON.parse(await readFile(fixturesFile, "utf-8"));
@@ -384,6 +420,65 @@ describe("Schema-validation depth parity", async () => {
       );
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Shared regression parity: ASCII-only receipt field-name policy
+// ---------------------------------------------------------------------------
+
+describe("Regression parity: receipt field-name policy", async () => {
+  const specFile = join(REGRESSION_VECTORS, "homoglyph_field_bypass_spec.json");
+  const regressionSpec = JSON.parse(await readFile(specFile, "utf-8")) as {
+    specimen: string;
+    invariant: string;
+    receipt: Record<string, unknown>;
+  };
+  const CYRILLIC_I = "\u0456";
+  const HOMOGLYPH_FIELD = `s${CYRILLIC_I}gnatures`;
+
+  it(`${regressionSpec.specimen}: rejects the shared homoglyph specimen at validate_receipts`, async () => {
+    const receipt = structuredClone(regressionSpec.receipt) as Record<string, unknown>;
+    const pack = await buildPackWithSingleReceipt(receipt);
+
+    const result = verifyPack(pack);
+
+    assert.equal(regressionSpec.invariant, "INV-07");
+    assertReceiptFieldPolicyFailure(result, "shared homoglyph specimen");
+  });
+
+  it("rejects nested non-ASCII object member names", async () => {
+    const receipt = {
+      receipt_id: "inv07-ts-nested-homoglyph",
+      type: "test",
+      timestamp: "2026-04-04T00:00:00Z",
+      payload: {
+        [HOMOGLYPH_FIELD]: { detail: "nested" },
+      },
+    };
+
+    const result = verifyPack(await buildPackWithSingleReceipt(receipt));
+    assertReceiptFieldPolicyFailure(result, "nested homoglyph receipt");
+  });
+
+  it("does not reject ASCII receipt field names at validate_receipts", async () => {
+    const receipt = {
+      receipt_id: "inv07-ts-ascii-positive",
+      type: "test",
+      timestamp: "2026-04-04T00:00:00Z",
+      payload: { action: "ok" },
+      custom_ascii_field: "valid",
+    };
+
+    const result = verifyPack(await buildPackWithSingleReceipt(receipt));
+    const receiptStage = result.stages.find((stage) => stage.stage === "validate_receipts");
+
+    assert.ok(receiptStage, "Missing validate_receipts stage for ASCII positive control");
+    assert.equal(receiptStage!.status, "ok");
+    assert.ok(
+      !result.errors.some((e) => e.message.includes("ASCII-only object member names")),
+      `ASCII positive control must not trip the field-name boundary, got: ${JSON.stringify(result.errors)}`
+    );
+  });
 });
 
 // --- Core conformance ---

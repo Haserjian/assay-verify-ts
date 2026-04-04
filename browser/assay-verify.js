@@ -9022,7 +9022,35 @@ var SIGNATURE_FIELDS_V0 = /* @__PURE__ */ new Set([
   "signature",
   "signatures"
 ]);
+function validateAsciiObjectMemberNames(value, path = "$") {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      validateAsciiObjectMemberNames(item, `${path}[${index}]`);
+    });
+    return;
+  }
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") {
+      throw new TypeError(
+        `Receipt object member names must be strings for canonicalization; found ${String(key)} at ${path}`
+      );
+    }
+    if (!/^[\x00-\x7F]*$/.test(key)) {
+      throw new Error(
+        `Receipt object member name ${JSON.stringify(key)} at ${path} contains non-ASCII characters. Assay's field-name policy requires ASCII-only object member names before projection and canonicalization.`
+      );
+    }
+    validateAsciiObjectMemberNames(
+      value[key],
+      `${path}.${key}`
+    );
+  }
+}
 function prepareReceiptForHashing(receipt) {
+  validateAsciiObjectMemberNames(receipt);
   const result = {};
   for (const [key, value] of Object.entries(receipt)) {
     if (!SIGNATURE_FIELDS_V0.has(key)) {
@@ -9207,13 +9235,24 @@ function verifyPack(pack) {
     }
   }
   let headHash = null;
-  for (const receipt of receipts) {
+  let headHashComputationOk = true;
+  for (let i = 0; i < receipts.length; i++) {
+    const receipt = receipts[i];
     try {
       const prepared = prepareReceiptForHashing(receipt);
       const canonical = canonicalize(prepared);
       headHash = sha256hex(canonical);
-    } catch {
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      errors.push({
+        code: "E_MANIFEST_TAMPER",
+        message: `Receipt ${i}: ${message}`,
+        field: "receipt_pack.jsonl"
+      });
+      receiptsOk = false;
+      headHashComputationOk = false;
       headHash = null;
+      break;
     }
   }
   if (headHash === null && receipts.length === 0) {
@@ -9223,11 +9262,13 @@ function verifyPack(pack) {
   const claimedHead = attestation.head_hash;
   if (claimedHead) {
     if (headHash === null) {
-      errors.push({
-        code: "E_MANIFEST_TAMPER",
-        message: "Attestation claims head_hash but verifier could not recompute it",
-        field: "head_hash"
-      });
+      if (headHashComputationOk) {
+        errors.push({
+          code: "E_MANIFEST_TAMPER",
+          message: "Attestation claims head_hash but verifier could not recompute it",
+          field: "head_hash"
+        });
+      }
       receiptsOk = false;
     } else if (claimedHead !== headHash) {
       errors.push({

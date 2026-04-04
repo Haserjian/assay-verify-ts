@@ -47,6 +47,18 @@ Uses **Assay JCS Profile v1** — based on RFC 8785 with one documented deviatio
 
 This is explicitly Assay canonicalization doctrine, not unqualified RFC 8785 conformance.
 
+Proof-pack receipt field names are screened separately from JCS. The verifier enforces an
+ASCII-only object-member-name policy before receipt head-hash projection in `verify-core.ts`.
+
+That policy is:
+- a higher-layer identifier rule above JCS
+- shared with the Python implementation through the same regression corpus
+
+It is not:
+- a Unicode confusable-detection engine
+- a JCS normalization fix
+- a broader homoglyph defense claim beyond the current ASCII-only receipt field-name rule
+
 ## Development
 
 ```bash

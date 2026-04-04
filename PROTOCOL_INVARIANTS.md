@@ -15,3 +15,5 @@ Hard rules for the Assay verification protocol. These do not soften.
 6. **Named deviations from external standards must remain explicit.** Assay JCS Profile v1 deviates from RFC 8785 on scientific notation exponent formatting. That deviation is documented, versioned, and tracked in SPEC_DEBT_REGISTER.md. No new deviations may be introduced silently.
 
 7. **Second implementations instantiate frozen doctrine. They do not discover it.** If a second implementation reveals an ambiguity, the fix goes into the contract docs and corpus first, then both implementations conform.
+
+8. **Receipt field-name policy lives above JCS.** If proof-pack receipt object member names are screened, that happens before receipt projection/head-hash canonicalization, not inside JCS. The current shared policy is ASCII-only object member names. Do not describe it as Unicode confusable detection or as a JCS normalization change.
