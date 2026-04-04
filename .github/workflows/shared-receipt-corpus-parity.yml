@@ -1,0 +1,46 @@
+name: Shared Receipt Corpus Parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  shared-corpus-parity:
+    name: shared-corpus-parity
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout assay-verify-ts
+        uses: actions/checkout@v4
+
+      - name: Checkout assay corpus
+        uses: actions/checkout@v4
+        with:
+          repository: Haserjian/assay
+          path: assay
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install assay test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./assay[dev]"
+
+      - name: Run Python shared receipt corpus regression
+        run: pytest assay/tests/contracts/parity/test_shared_regression_corpus.py -q
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Run TypeScript shared receipt corpus regression
+        env:
+          ASSAY_VECTORS_DIR: ${{ github.workspace }}/assay/tests/contracts/vectors
+        run: npm test
