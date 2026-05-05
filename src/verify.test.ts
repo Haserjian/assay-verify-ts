@@ -16,7 +16,11 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import * as ed from "@noble/ed25519";
 import { canonicalize, canonicalizeToString } from "./jcs.js";
-import { verifyPackManifest, verifyPack } from "./verify.js";
+import {
+  validateJurisdictionReceiptSchema,
+  verifyPackManifest,
+  verifyPack,
+} from "./verify.js";
 import type { PackContents } from "./verify.js";
 
 ed.etc.sha512Sync = (...m: Uint8Array[]) => {
@@ -516,6 +520,7 @@ describe("Conformance: browser bundle", async () => {
   it("exports verifyPack and canonicalize", () => {
     assert.equal(typeof bundle.verifyPack, "function");
     assert.equal(typeof bundle.canonicalize, "function");
+    assert.equal(typeof bundle.validateJurisdictionReceiptSchema, "function");
   });
 
   for (const fixture of CONFORMANCE_FIXTURES) {
@@ -1151,5 +1156,270 @@ describe("Per-receipt required field validation", async () => {
       schemaErrors.length > 0,
       `Expected E_SCHEMA_UNKNOWN for missing 'timestamp', got: ${JSON.stringify(result.errors.map(e => e.code + ":" + (e.field ?? "")))}`
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guardian jurisdiction receipt public contract
+// ---------------------------------------------------------------------------
+
+function factorizeJurisdictionReceipt(): Record<string, unknown> {
+  return {
+    receipt_type: "jurisdiction_loss",
+    algorithm_version: "epistemic-jurisdiction-v0.1",
+    hypothesis_id: "H_zoo",
+    previous_status: "active",
+    previous_proof_tier: "candidate_invariant",
+    routing_decision: "factorize",
+    failure_shape: {
+      constraint_power: -0.1,
+      generalization_stability: 0.3,
+      zoo_index: 0.85,
+      self_explanation_pressure: 0.2,
+      explanation_debt: 12.0,
+      model_complexity: 8.0,
+      temporal_coherence: 0.5,
+    },
+    intervention_elasticities: {
+      parameter: 0.06,
+      factorization: 0.22,
+      representation: 0.07,
+    },
+    thresholds: {
+      min_elasticity: 0.05,
+      self_sealing_threshold: 0.8,
+    },
+    selected_intervention: "factorize",
+    selected_elasticity: 0.22,
+    candidate_elasticities: {
+      refine: 0.06,
+      factorize: 0.22,
+      replace_frame: 0.07,
+    },
+    tie_breaker: null,
+    probe_receipt_refs: ["probe_factorization_001"],
+    decision_rule: "highest restorative elasticity cleared threshold",
+    preserved_residual_signal: "Detected evidence-ref mismatch but overloaded multiple regimes.",
+    counterexamples: [],
+    new_permissions: {
+      can_govern: false,
+      can_suggest: true,
+      can_gather_evidence: true,
+      requires_followup_receipts: true,
+      requires_child_receipts: true,
+      requires_new_receipts_for_reactivation: false,
+      authority_scope: "children_must_reestablish_scoped_authority",
+    },
+  };
+}
+
+function archiveHardJurisdictionReceipt(): Record<string, unknown> {
+  const receipt = factorizeJurisdictionReceipt();
+  receipt.hypothesis_id = "H_self_seal";
+  receipt.routing_decision = "archive_hard";
+  receipt.selected_intervention = "archive_hard";
+  receipt.selected_elasticity = null;
+  receipt.failure_shape = {
+    constraint_power: -0.02,
+    generalization_stability: 0.2,
+    zoo_index: 0.4,
+    self_explanation_pressure: 0.95,
+    explanation_debt: 24.0,
+    model_complexity: 11.0,
+    temporal_coherence: 0.3,
+  };
+  receipt.intervention_elasticities = {
+    parameter: 0.2,
+    factorization: 0.3,
+    representation: 0.4,
+  };
+  receipt.candidate_elasticities = {
+    refine: 0.2,
+    factorize: 0.3,
+    replace_frame: 0.4,
+  };
+  receipt.probe_receipt_refs = ["probe_self_seal_001"];
+  receipt.decision_rule =
+    "self_explanation_pressure cleared threshold while constraint_power was non-positive";
+  receipt.preserved_residual_signal =
+    "The hypothesis still names a historical failure mode but cannot govern.";
+  receipt.new_permissions = {
+    can_govern: false,
+    can_suggest: true,
+    can_gather_evidence: false,
+    requires_followup_receipts: false,
+    requires_child_receipts: false,
+    requires_new_receipts_for_reactivation: true,
+    authority_scope: "ghost_signal_only",
+  };
+  return receipt;
+}
+
+function quarantineJurisdictionReceipt(): Record<string, unknown> {
+  const receipt = factorizeJurisdictionReceipt();
+  receipt.hypothesis_id = "H_unknown_kind";
+  receipt.routing_decision = "quarantine";
+  receipt.selected_intervention = "quarantine";
+  receipt.selected_elasticity = 0.04;
+  receipt.failure_shape = {
+    constraint_power: -0.1,
+    generalization_stability: 0.3,
+    zoo_index: 0.5,
+    self_explanation_pressure: 0.2,
+    explanation_debt: 18.0,
+    model_complexity: 9.0,
+    temporal_coherence: 0.4,
+  };
+  receipt.intervention_elasticities = {
+    parameter: 0.01,
+    factorization: 0.04,
+    representation: 0.03,
+  };
+  receipt.candidate_elasticities = {
+    refine: 0.01,
+    factorize: 0.04,
+    replace_frame: 0.03,
+  };
+  receipt.probe_receipt_refs = [];
+  receipt.decision_rule = "no restorative elasticity cleared threshold";
+  receipt.preserved_residual_signal = "";
+  receipt.counterexamples = [
+    {
+      case_id: "ce_001",
+      summary: "No known intervention restored constraint.",
+    },
+  ];
+  receipt.new_permissions = {
+    can_govern: false,
+    can_suggest: false,
+    can_gather_evidence: true,
+    requires_followup_receipts: true,
+    requires_child_receipts: false,
+    requires_new_receipts_for_reactivation: true,
+    authority_scope: "quarantined_pending_new_evidence",
+  };
+  return receipt;
+}
+
+function cloneReceipt(receipt: Record<string, unknown>): Record<string, unknown> {
+  return structuredClone(receipt) as Record<string, unknown>;
+}
+
+function newPermissions(receipt: Record<string, unknown>): Record<string, unknown> {
+  return receipt.new_permissions as Record<string, unknown>;
+}
+
+function assertJurisdictionReceiptInvalid(
+  receipt: Record<string, unknown>,
+  label: string,
+): void {
+  const errors = validateJurisdictionReceiptSchema(receipt);
+  assert.ok(errors.length > 0, `${label}: expected schema rejection`);
+}
+
+describe("Guardian jurisdiction receipt schema", () => {
+  it("accepts valid factorize receipts", () => {
+    assert.deepEqual(validateJurisdictionReceiptSchema(factorizeJurisdictionReceipt()), []);
+  });
+
+  it("accepts valid archive_hard receipts", () => {
+    assert.deepEqual(validateJurisdictionReceiptSchema(archiveHardJurisdictionReceipt()), []);
+  });
+
+  it("accepts valid quarantine receipts", () => {
+    assert.deepEqual(validateJurisdictionReceiptSchema(quarantineJurisdictionReceipt()), []);
+  });
+
+  it("rejects invalid routing_decision", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    receipt.routing_decision = "explain_away";
+
+    assertJurisdictionReceiptInvalid(receipt, "invalid routing_decision");
+  });
+
+  it("rejects missing candidate_elasticities", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    delete receipt.candidate_elasticities;
+
+    assertJurisdictionReceiptInvalid(receipt, "missing candidate_elasticities");
+  });
+
+  it("rejects extra top-level fields", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    receipt.decorative_confidence = "high";
+
+    assertJurisdictionReceiptInvalid(receipt, "extra top-level field");
+  });
+
+  it("rejects selected_intervention mismatches", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    receipt.selected_intervention = "refine";
+
+    assertJurisdictionReceiptInvalid(receipt, "selected_intervention mismatch");
+  });
+
+  it("allows archive_hard selected_elasticity to be null", () => {
+    const receipt = archiveHardJurisdictionReceipt();
+    receipt.selected_elasticity = null;
+
+    assert.deepEqual(validateJurisdictionReceiptSchema(receipt), []);
+  });
+
+  it("allows quarantine selected_elasticity to be null", () => {
+    const receipt = quarantineJurisdictionReceipt();
+    receipt.selected_elasticity = null;
+
+    assert.deepEqual(validateJurisdictionReceiptSchema(receipt), []);
+  });
+
+  it("rejects restorative selected_elasticity null", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    receipt.selected_elasticity = null;
+
+    assertJurisdictionReceiptInvalid(receipt, "restorative selected_elasticity null");
+  });
+
+  it("rejects archive_hard receipts that retain governing authority", () => {
+    const receipt = archiveHardJurisdictionReceipt();
+    newPermissions(receipt).can_govern = true;
+
+    assertJurisdictionReceiptInvalid(receipt, "archive_hard can_govern");
+  });
+
+  it("rejects quarantine receipts that retain governing authority", () => {
+    const receipt = quarantineJurisdictionReceipt();
+    newPermissions(receipt).can_govern = true;
+
+    assertJurisdictionReceiptInvalid(receipt, "quarantine can_govern");
+  });
+
+  it("rejects factorize receipts without child receipt requirements", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    newPermissions(receipt).requires_child_receipts = false;
+
+    assertJurisdictionReceiptInvalid(receipt, "factorize requires_child_receipts");
+  });
+
+  it("rejects receipts without replay thresholds", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    delete receipt.thresholds;
+
+    assertJurisdictionReceiptInvalid(receipt, "missing thresholds");
+  });
+
+  it("rejects receipts without algorithm_version", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    delete receipt.algorithm_version;
+
+    assertJurisdictionReceiptInvalid(receipt, "missing algorithm_version");
+  });
+
+  it("does not mutate receipts during validation", () => {
+    const receipt = factorizeJurisdictionReceipt();
+    const before = cloneReceipt(receipt);
+
+    validateJurisdictionReceiptSchema(receipt);
+
+    assert.deepEqual(receipt, before);
   });
 });

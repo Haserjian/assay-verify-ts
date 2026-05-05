@@ -14,5 +14,10 @@ export {
   type StageReceipt,
 } from "./verify-core.js";
 
+export {
+  validateJurisdictionReceiptSchema,
+  type SchemaValidationError,
+} from "./schema-validation.js";
+
 // Node-only convenience wrapper
 export { verifyPackManifest } from "./verify-node.js";

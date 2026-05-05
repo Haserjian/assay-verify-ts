@@ -4,4 +4,6 @@
  */
 export { verifyPack } from "./verify-core.js";
 export type { PackContents, VerifyResult, VerifyError, StageReceipt } from "./verify-core.js";
+export { validateJurisdictionReceiptSchema } from "./schema-validation.js";
+export type { SchemaValidationError } from "./schema-validation.js";
 export { canonicalize, canonicalizeToString } from "./jcs.js";

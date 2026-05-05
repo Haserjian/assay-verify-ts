@@ -20,6 +20,10 @@ const result = verifyPack({ manifest, files }); // sync, no I/O
 // Node convenience wrapper (reads files from disk)
 import { verifyPackManifest } from "assay-verify/dist/verify.js";
 const result = await verifyPackManifest("/path/to/pack"); // async, reads files
+
+// Guardian jurisdiction receipt contract validation
+import { validateJurisdictionReceiptSchema } from "assay-verify/dist/verify.js";
+const issues = validateJurisdictionReceiptSchema(receipt); // [] means valid
 ```
 
 `verifyPack()` takes pre-loaded pack contents as `PackContents`:
@@ -40,6 +44,8 @@ Given a 5-file proof pack:
 - Receipt count cross-check
 - Signer fingerprint verification
 - Path containment
+
+Separately, `validateJurisdictionReceiptSchema()` validates Guardian jurisdiction receipt shape and authority-permission constraints. `verifyPack()` does not currently apply that receipt-specific schema while verifying a 5-file proof pack.
 
 ## Canonicalization
 

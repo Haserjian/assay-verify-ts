@@ -1,7 +1,11 @@
 import * as Ajv2020Module from "ajv/dist/2020.js";
 import * as addFormatsModule from "ajv-formats";
 import type { ErrorObject, ValidateFunction } from "ajv/dist/2020.js";
-import { ATTESTATION_SCHEMA, PACK_MANIFEST_SCHEMA } from "./schema-definitions.js";
+import {
+  ATTESTATION_SCHEMA,
+  JURISDICTION_RECEIPT_SCHEMA,
+  PACK_MANIFEST_SCHEMA,
+} from "./schema-definitions.js";
 
 export interface SchemaValidationError {
   field?: string;
@@ -29,6 +33,7 @@ addFormats(ajv);
 ajv.addSchema(ATTESTATION_SCHEMA);
 
 const validateManifestFn = ajv.compile(PACK_MANIFEST_SCHEMA);
+const validateJurisdictionReceiptFn = ajv.compile(JURISDICTION_RECEIPT_SCHEMA);
 const validateAttestationFn = ajv.getSchema(ATTESTATION_SCHEMA.$id);
 
 if (!validateAttestationFn) {
@@ -76,6 +81,10 @@ function collectValidationErrors(
 
 export function validateManifestSchema(manifest: unknown): SchemaValidationError[] {
   return collectValidationErrors(validateManifestFn, manifest);
+}
+
+export function validateJurisdictionReceiptSchema(receipt: unknown): SchemaValidationError[] {
+  return collectValidationErrors(validateJurisdictionReceiptFn, receipt);
 }
 
 export function validateAttestationSchema(attestation: unknown): SchemaValidationError[] {
